@@ -261,30 +261,27 @@ def parse_args():
                         help='Maximum width of a page (default: read from blurb doc)')
     parser.add_argument('-i', '--imageHeight', dest='image_height', metavar='N', type=float,
                         default=200.0, help='Minimum height of an image (default: %(default).0f)')
-    parser.add_argument('-l', '--left', dest='left', metavar='N', type=float, default=-1.0,
-                        help='Left margin')
-    parser.add_argument('-r', '--right', dest='right', metavar='N', type=float, default=28.0,
-                        help='Right margin')
-    parser.add_argument('-t', '--top', dest='top', metavar='N', type=float, default=28.0,
-                        help='Top margin')
-    parser.add_argument('-b', '--bottom', dest='bottom', metavar='N', type=float, default=28,
-                        help='Bottom margin')
     parser.add_argument('-dx', '--xdelta', dest='xdelta', metavar='N', type=float, default=0.0,
                         help='X gap between images (default: %(default).0f)')
     parser.add_argument('-dy', '--ydelta', dest='ydelta', metavar='N', type=float, default=0.0,
                         help='Y gap between images (default: %(default).0f)')
-    parser.add_argument('-v', '--vertical', dest='vertical', action='store_true',
-                        help='Vertical layout mode')
-    parser.add_argument('-m', '--mirror', dest='mirror', action='store_true',
+    parser.add_argument('--left', dest='left', metavar='N', type=float, default=-1.0,
+                        help='Left margin')
+    parser.add_argument('--right', dest='right', metavar='N', type=float, default=28.0,
+                        help='Right margin')
+    parser.add_argument('--top', dest='top', metavar='N', type=float, default=28.0,
+                        help='Top margin')
+    parser.add_argument('--bottom', dest='bottom', metavar='N', type=float, default=28,
+                        help='Bottom margin')
+    parser.add_argument('--mirror', dest='mirror', action='store_true',
                         help='Mirror left/right margins on even/odd pages')
-    parser.add_argument('--verbose', dest='verbose', action='store_true', help='Verbose mode')
-    parser.add_argument('--smart', dest='smart', action='store_true', help='Smart sort mode')
-    parser.add_argument('-c', '--center', dest='center', action='store_true',
-                        help='Center resulting page within space')
+    parser.add_argument('--smart', dest='smart', action='store_true', help='Smart layout mode')
+    parser.add_argument('--center', dest='center', action='store_true',
+                        help='Center images or rows within page')
     parser.add_argument('--spread', dest='spread', action='store_true',
-                        help='Spread resulting rows within space')
+                        help='Spread images or rows within page')
     parser.add_argument('--scale', dest='scale', action='store_true',
-                        help='Scale resulting rows to fill space')
+                        help='Scale images within rows to fill width')
     parser.add_argument('--double', dest='double', action='store_true',
                         help='Use double-page spreads where possible')
     parser.add_argument('-o', '--output', dest='output', help='Output filename')
