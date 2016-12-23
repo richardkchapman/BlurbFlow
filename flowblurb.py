@@ -24,27 +24,29 @@ class PageBuilder(object):
     def _row_width(self, row):
         num_deltas = len(row)-1
         row_width = sum(img.image.width*img.scale for img in row)
-        return row_width + self.args.xdelta*num_deltas
+        return row_width + self.args.xspace*num_deltas
 
     def _generate_page(self, page_width, rows, current_page_height, pageno):
         page = []
         y = self.args.top
-        ydelta = self.args.ydelta
-        if self.args.spread and len(rows) > 1:
-            ydelta += (self.page_height - current_page_height)/(len(rows)-1)
-        elif self.args.center:
+        yspace = self.args.yspace
+        if self.args.yspread and len(rows) > 1:
+            yspace += (self.page_height - current_page_height)/(len(rows)-1)
+        elif self.args.ycenter:
             y += (self.page_height - current_page_height)/2
         for row in rows:
             if self.args.mirror and pageno%2 == 0:
                 x = self.args.right
             else:
                 x = self.args.left
-            xdelta = self.args.xdelta
+            xspace = self.args.xspace
             row_width = self._row_width(row)
-            if self.args.spread and len(row) > 1:
-                xdelta += (page_width - row_width)/(len(row)-1)
-            elif self.args.center:
+            if self.args.xspread and len(row) > 1:
+                xspace += (page_width - row_width)/(len(row)-1)
+            elif self.args.xcenter:
                 x += (page_width - row_width)/2
+            elif self.args.mirror and pageno%2 == 1:
+                x += (page_width - row_width)
             for img in row:
                 page.append(
                     {
@@ -58,8 +60,8 @@ class PageBuilder(object):
                         'name': img.image.name,
                         'scale': str(img.scale)
                     })
-                x += img.image.width*img.scale + xdelta
-            y += row[0].image.height*row[0].scale + ydelta
+                x += img.image.width*img.scale + xspace
+            y += row[0].image.height*row[0].scale + yspace
         return page
 
     def _preferred_size(self, width, height, _):
@@ -83,11 +85,11 @@ class PageBuilder(object):
             if row_width + scaledw > page_width:
                 if row:
                     self.images.append(image)
-                    row_width -= self.args.xdelta      # we always added a trailing whitespace
+                    row_width -= self.args.xspace      # we always added a trailing whitespace
                     # Required scale is what it takes to turn the current row width
                     # into the desired row width, but ignoring the whitespace which is not scaled
                     if self.args.scale:
-                        whitespace = (len(row)-1) * self.args.xdelta
+                        whitespace = (len(row)-1) * self.args.xspace
                         target_width = page_width - whitespace
                         row_width -= whitespace
                         scale = target_width/row_width
@@ -100,7 +102,7 @@ class PageBuilder(object):
                     scaledw = page_width
                     scaledh = height * scaledw/width
             row.append(ScaledImageInfo(image, scaledh/height))
-            row_width += scaledw + self.args.xdelta
+            row_width += scaledw + self.args.xspace
         return row if row else None
 
     def _unget_all_row(self, row):
@@ -124,8 +126,8 @@ class PageBuilder(object):
                 self._unget_row(next_row)
                 break
             page_rows.append(next_row)
-            height += row_height + self.args.ydelta
-        height -= self.args.ydelta
+            height += row_height + self.args.yspace
+        height -= self.args.yspace
         return self._generate_page(page_width, page_rows, height, pageno)
 
     def get_pages(self, pagenos):
@@ -261,9 +263,9 @@ def parse_args():
                         help='Maximum width of a page (default: read from blurb doc)')
     parser.add_argument('-i', '--imageHeight', dest='image_height', metavar='N', type=float,
                         default=200.0, help='Minimum height of an image (default: %(default).0f)')
-    parser.add_argument('-dx', '--xdelta', dest='xdelta', metavar='N', type=float, default=0.0,
+    parser.add_argument('--xspace', dest='xspace', metavar='N', type=float, default=0.0,
                         help='X gap between images (default: %(default).0f)')
-    parser.add_argument('-dy', '--ydelta', dest='ydelta', metavar='N', type=float, default=0.0,
+    parser.add_argument('--yspace', dest='yspace', metavar='N', type=float, default=0.0,
                         help='Y gap between images (default: %(default).0f)')
     parser.add_argument('--left', dest='left', metavar='N', type=float, default=-1.0,
                         help='Left margin')
@@ -276,10 +278,14 @@ def parse_args():
     parser.add_argument('--mirror', dest='mirror', action='store_true',
                         help='Mirror left/right margins on even/odd pages')
     parser.add_argument('--smart', dest='smart', action='store_true', help='Smart layout mode')
-    parser.add_argument('--center', dest='center', action='store_true',
-                        help='Center images or rows within page')
-    parser.add_argument('--spread', dest='spread', action='store_true',
-                        help='Spread images or rows within page')
+    parser.add_argument('--ycenter', dest='ycenter', action='store_true',
+                        help='Center rows vertically within page')
+    parser.add_argument('--xcenter', dest='xcenter', action='store_true',
+                        help='Center rows horizontally within page')
+    parser.add_argument('--xspread', dest='xspread', action='store_true',
+                        help='Spread images horizontally within rows')
+    parser.add_argument('--yspread', dest='yspread', action='store_true',
+                        help='Spread rows vertically within pages')
     parser.add_argument('--scale', dest='scale', action='store_true',
                         help='Scale images within rows to fill width')
     parser.add_argument('--double', dest='double', action='store_true',
