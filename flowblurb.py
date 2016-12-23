@@ -6,6 +6,7 @@ import sys
 import math
 import uuid
 import collections
+import json
 import lxml.etree as ET
 import extractBlurbFiles
 import mergeBlurbFiles
@@ -255,6 +256,22 @@ def empty_pages(doc):
 
 def parse_args():
     """ Command line parsing code"""
+
+    class LoadFromJson(argparse.Action):  # pylint: disable=I0011,R0903
+        """ argparse action to support reading options from a json dictionary. """
+        def __call__(self, parser, namespace, values, option_string=None):
+            for key, value in values.iteritems():
+                if key != option_string.lstrip('-'):
+                    setattr(namespace, key, value)
+
+    def jsonfile(filename):
+        """ Argparse helper for parsing json files. """
+        try:
+            with open(filename) as json_data:
+                return json.load(json_data)
+        except:
+            raise argparse.ArgumentTypeError('Invalid option file %s' % filename)
+
     parser = argparse.ArgumentParser(description='Update blurb files', add_help=False)
     parser.add_argument('--help', action='help', help='show this help message and exit')
     parser.add_argument('-h', '--height', dest='page_height', metavar='N', type=float, default=-1,
@@ -292,9 +309,13 @@ def parse_args():
                         help='Use double-page spreads where possible')
     parser.add_argument('-o', '--output', dest='output', help='Output filename')
     parser.add_argument('-f', '--force', dest='force', help='Force overwrite', action='store_true')
-
+    parser.add_argument('--file', type=jsonfile, action=LoadFromJson)
     parser.add_argument('target')
-    return parser.parse_args()
+
+    if os.path.exists('./flowblurb.json'):
+        return parser.parse_args(['--file', './flowblurb.json']+sys.argv[1:])
+    else:
+        return parser.parse_args()
 
 def update_blurb(doc, populated):
     """ Update a blurb file from a populated layout. """
