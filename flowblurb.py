@@ -7,6 +7,8 @@ import math
 import uuid
 import collections
 import json
+import tempfile
+import shutil
 import lxml.etree as ET
 import extractBlurbFiles
 import mergeBlurbFiles
@@ -27,14 +29,36 @@ class PageBuilder(object):
         row_width = sum(img.image.width*img.scale for img in row)
         return row_width + self.args.xspace*num_deltas
 
-    def _generate_page(self, page_width, rows, current_page_height, pageno):
-        page = []
+    def _page_height(self, rows):
+        num_deltas = len(rows)-1
+        page_height = sum(row[0].image.height*row[0].scale for row in rows)
+        return page_height + self.args.yspace*num_deltas
+
+    def _calc_y_position(self, rows, first):
+        """ Calculate appropriate y origin and spacing. """
+        current_page_height = self._page_height(rows)
         y = self.args.top
         yspace = self.args.yspace
-        if self.args.yspread and len(rows) > 1:
+        if self.args.yspread and len(rows) > 1 and self.page_height > current_page_height:
             yspace += (self.page_height - current_page_height)/(len(rows)-1)
         elif self.args.ycenter:
-            y += (self.page_height - current_page_height)/2
+            if self.args.overfill:
+                # It's complicated. Don't center first page at all. Center others based on just the
+                # 'full' images. Last page... who knows
+                if not first:
+                    if self.page_height > current_page_height:
+                        # last page - show last 1/3 of first row
+                        y -= self._page_height(rows[0:1])*0.66+self.args.yspace
+                    else:
+                        y += (self.page_height - self._page_height(rows[1:-1]))/2
+                        y -= self._page_height(rows[0:1])+self.args.yspace
+            else:
+                y += (self.page_height - current_page_height)/2
+        return (y, yspace)
+
+    def _generate_page(self, page_width, rows, pageno, first):
+        page = []
+        y, yspace = self._calc_y_position(rows, first)
         for row in rows:
             if self.args.mirror and pageno%2 == 0:
                 x = self.args.right
@@ -114,7 +138,7 @@ class PageBuilder(object):
     def _unget_row(self, row):
         self._unget_all_row(row)
 
-    def next_page(self, page_width, pageno):
+    def next_page(self, page_width, pageno, first):
         """ Get a page from the image list. """
         height = 0
         page_rows = []
@@ -125,15 +149,22 @@ class PageBuilder(object):
             row_height = next_row[0].image.height * next_row[0].scale
             if row_height + height > self.page_height:
                 self._unget_row(next_row)
+                if self.args.overfill:
+                    # An alternative approach to overfill is to treat it as a
+                    # padding mathod in generate
+                    self._unget_row(page_rows[-1])
+                    page_rows.append(next_row)
                 break
+            if page_rows or not self.args.overfill or first:
+                height += row_height + self.args.yspace
             page_rows.append(next_row)
-            height += row_height + self.args.yspace
         height -= self.args.yspace
-        return self._generate_page(page_width, page_rows, height, pageno)
+        return self._generate_page(page_width, page_rows, pageno, first)
 
     def get_pages(self, pagenos):
         """ Return a page for each page nuber provided."""
         i = 0
+        first = True
         while i < len(pagenos):
             double = False
             pageno = pagenos[i]
@@ -148,9 +179,11 @@ class PageBuilder(object):
                 double = True
             else:
                 page_width = self.args.page_width-(self.args.left+self.args.right)
-            populated = self.next_page(page_width, pageno)
-            if populated:
-                yield (populated, pageno, double)
+            if double or not self.args.double_only:
+                populated = self.next_page(page_width, pageno, first)
+                first = False
+                if populated:
+                    yield (populated, pageno, double)
 
 class SmartPageBuilder(PageBuilder):
     """ Populate images onto pages, trying to do so intelligently.
@@ -169,10 +202,10 @@ class SmartPageBuilder(PageBuilder):
         self.all_rows = None
         self.mode = 0
         self.last_row = None
-        self.next_row = None
+        self.next_row = []
         self.last_width = 0
 
-    def _generate_page(self, page_width, rows, current_page_height, pageno):
+    def _generate_page(self, page_width, rows, pageno, first):
         if not self.args.scale:
             # sort the rows to a more pleasing order - wide in the middle
             rows.sort(key=self._row_width, reverse=True)
@@ -183,9 +216,7 @@ class SmartPageBuilder(PageBuilder):
                 else:
                     new_rows.insert(0, row)
             rows = new_rows
-        return super(SmartPageBuilder, self)._generate_page(page_width, rows,
-                                                            current_page_height,
-                                                            pageno)
+        return super(SmartPageBuilder, self)._generate_page(page_width, rows, pageno, first)
 
     def _preferred_size(self, width, height, image):
         """ What width/height would make this image have area self.image_height^2"""
@@ -207,10 +238,8 @@ class SmartPageBuilder(PageBuilder):
         # Pick rows from tall, wide, middle in turn, forcing the last (incomplete)
         # row to remain last
         if self.next_row:
-            ret = self.next_row
-            self.next_row = None
-            return ret
-        if not self.all_rows:
+            return self.next_row.pop()
+        elif not self.all_rows:
             ret = self.last_row
             self.last_row = None
             return ret
@@ -225,22 +254,21 @@ class SmartPageBuilder(PageBuilder):
             return self.all_rows.pop(len(self.all_rows)/2)
 
     def _unget_row(self, row):
-        if self.next_row:
-            print "Uh oh"
-        self.next_row = row
+        self.next_row.append(row)
 
-    def next_page(self, page_width, pageno):
+    def next_page(self, page_width, pageno, first):
         if page_width != self.last_width:
             if self.all_rows:
                 for row in self.all_rows:
                     self._unget_all_row(row)
             self._unget_all_row(self.last_row)
-            self._unget_all_row(self.next_row)
+            for row in self.next_row:
+                self._unget_all_row(row)
             self.all_rows = None
             self.last_row = None
-            self.next_row = None
+            self.next_row = []
         self.last_width = page_width
-        return super(SmartPageBuilder, self).next_page(page_width, pageno)
+        return super(SmartPageBuilder, self).next_page(page_width, pageno, first)
 
 def find_page(doc, pageno):
     """ Find specific page in blurb document. """
@@ -307,15 +335,21 @@ def parse_args():
                         help='Scale images within rows to fill width')
     parser.add_argument('--double', dest='double', action='store_true',
                         help='Use double-page spreads where possible')
+    parser.add_argument('--double-only', action='store_true',
+                        help='Only populate double-page spreads')
+    parser.add_argument('--overfill', action='store_true',
+                        help='Overfill pages')
     parser.add_argument('-o', '--output', dest='output', help='Output filename')
     parser.add_argument('-f', '--force', dest='force', help='Force overwrite', action='store_true')
-    parser.add_argument('--file', type=jsonfile, action=LoadFromJson)
+    parser.add_argument('--config', type=jsonfile, action=LoadFromJson)
     parser.add_argument('target')
-
     if os.path.exists('./flowblurb.json'):
-        return parser.parse_args(['--file', './flowblurb.json']+sys.argv[1:])
+        args = parser.parse_args(['--config', './flowblurb.json']+sys.argv[1:])
     else:
-        return parser.parse_args()
+        args = parser.parse_args()
+    if args.double_only:
+        args.double = True
+    return args
 
 def update_blurb(doc, populated):
     """ Update a blurb file from a populated layout. """
@@ -344,10 +378,12 @@ def main():
         print 'Target file %s already exists' % args.target
         sys.exit()
     if os.path.isfile(args.target):
-        extracted = args.target + '.tmp'
+        extracted = tempfile.mkdtemp(prefix=args.target)
+        istemp = True
         extractBlurbFiles.extract(args.target, extracted)
     else:
         extracted = args.target
+        istemp = False
     xml_parser = ET.XMLParser(remove_blank_text=True)
     doc = ET.parse(extracted+'/bbf2.xml', xml_parser)
     if args.page_width == -1:
@@ -379,6 +415,8 @@ def main():
     doc.write(extracted+'/bbf2.xml', pretty_print=True)
     if args.output:
         mergeBlurbFiles.merge(extracted, args.output)
+    if istemp:
+        shutil.rmtree(extracted)
 
 
 if __name__ == '__main__':
