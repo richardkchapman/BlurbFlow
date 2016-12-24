@@ -323,7 +323,7 @@ def empty_pages(doc):
         if not page.findall('container'):
             yield page
 
-def parse_args():
+def parse_args():                         # pylint: disable=I0011,R0915
     """ Command line parsing code"""
 
     class LoadFromJson(argparse.Action):  # pylint: disable=I0011,R0903
@@ -341,59 +341,74 @@ def parse_args():
         except:
             raise argparse.ArgumentTypeError('Invalid option file %s' % filename)
 
+    def _add_invertable(parser, name, help_string):
+        dest = name.replace('-', '_')
+        parser.add_argument('--'+name, dest=dest, action='store_true', help=help_string)
+        parser.add_argument('--no-'+name, dest=dest, action='store_false', help=argparse.SUPPRESS)
+
     parser = argparse.ArgumentParser(description='Update blurb files', add_help=False)
-    parser.add_argument('--help', action='help', help='show this help message and exit')
-    parser.add_argument('-h', '--height', dest='page_height', metavar='N', type=float, default=-1,
-                        help='Maximum height of a page (default: read from blurb doc)')
-    parser.add_argument('-w', '--width', dest='page_width', metavar='N', type=float, default=-1,
-                        help='Maximum width of a page (default: read from blurb doc)')
-    parser.add_argument('-i', '--imageHeight', dest='image_height', metavar='N', type=float,
-                        default=200.0, help='Minimum height of an image (default: %(default).0f)')
-    parser.add_argument('--xspace', dest='xspace', metavar='N', type=float, default=0.0,
-                        help='X gap between images (default: %(default).0f)')
-    parser.add_argument('--yspace', dest='yspace', metavar='N', type=float, default=0.0,
-                        help='Y gap between images (default: %(default).0f)')
-    parser.add_argument('--left', dest='left', metavar='N', type=float, default=-1.0,
-                        help='Left margin')
-    parser.add_argument('--right', dest='right', metavar='N', type=float, default=28.0,
-                        help='Right margin')
-    parser.add_argument('--top', dest='top', metavar='N', type=float, default=28.0,
-                        help='Top margin')
-    parser.add_argument('--bottom', dest='bottom', metavar='N', type=float, default=28,
-                        help='Bottom margin')
-    parser.add_argument('--mirror', dest='mirror', action='store_true',
-                        help='Mirror left/right margins on even/odd pages')
-    parser.add_argument('--smart', dest='smart', action='store_true', help='Smart layout mode')
-    parser.add_argument('--ycenter', dest='ycenter', action='store_true',
-                        help='Center rows vertically within page')
-    parser.add_argument('--xcenter', dest='xcenter', action='store_true',
-                        help='Center rows horizontally within page')
-    parser.add_argument('--xspread', dest='xspread', action='store_true',
-                        help='Spread images horizontally within rows')
-    parser.add_argument('--yspread', dest='yspread', action='store_true',
-                        help='Spread rows vertically within pages')
-    parser.add_argument('--scale', dest='scale', action='store_true',
-                        help='Scale images within rows to fill width')
-    parser.add_argument('--double', dest='double', action='store_true',
-                        help='Use double-page spreads where possible')
-    parser.add_argument('--double-only', action='store_true',
-                        help='Only populate double-page spreads')
-    parser.add_argument('--overfill', action='store_true',
-                        help='Overfill pages')
-    parser.add_argument('--sort', choices=['key', 'date', 'size', 'name', 'rating', 'exif'],
-                        help='Sort order')
-    parser.add_argument('--reverse', action='store_true',
-                        help='Reverse image sort order')
-    parser.add_argument('--sort_key',
-                        help='Exif field to sort by when --sort=exif specified')
-    parser.add_argument('--exiftool', default='exiftool',
-                        help='Location of exiftool (needed if sorting by exif fields')
-    parser.add_argument('-o', '--output', dest='output', help='Output filename')
-    parser.add_argument('-f', '--force', dest='force', help='Force overwrite', action='store_true')
-    parser.add_argument('--image-list', nargs='+')
-    parser.add_argument('--config', type=jsonfile, action=LoadFromJson)
-    parser.add_argument('target')
-    if os.path.exists('./flowblurb.json'):
+    required = parser.add_argument_group('Required arguments')
+    required.add_argument('--input', type=argparse.FileType('r'),
+                          help='Input blurb file', required=True)
+    required.add_argument('--output', help='Output blurb file')
+    required.add_argument('--output-dir', help='Output unpacked blurb directory')
+
+    optional = parser.add_argument_group('Optional arguments')
+    optional.add_argument('-h', '--height', dest='page_height', metavar='N', type=float, default=-1,
+                          help='Maximum height of a page (default: read from blurb doc)')
+    optional.add_argument('-w', '--width', dest='page_width', metavar='N', type=float, default=-1,
+                          help='Maximum width of a page (default: read from blurb doc)')
+    optional.add_argument('--imageHeight', dest='image_height', metavar='N', type=float,
+                          default=200.0, help='Minimum height of an image (default: %(default).0f)')
+    optional.add_argument('--xspace', dest='xspace', metavar='N', type=float, default=0.0,
+                          help='X gap between images (default: %(default).0f)')
+    optional.add_argument('--yspace', dest='yspace', metavar='N', type=float, default=0.0,
+                          help='Y gap between images (default: %(default).0f)')
+    optional.add_argument('--left', dest='left', metavar='N', type=float, default=-1.0,
+                          help='Left margin')
+    optional.add_argument('--right', dest='right', metavar='N', type=float, default=28.0,
+                          help='Right margin')
+    optional.add_argument('--top', dest='top', metavar='N', type=float, default=28.0,
+                          help='Top margin')
+    optional.add_argument('--bottom', dest='bottom', metavar='N', type=float, default=28,
+                          help='Bottom margin')
+    optional.add_argument('--format', choices=sorted(PRESETS.keys()),
+                          default='large-landscape', help='Blurb book layout if creating new book')
+
+    layout_flags = parser.add_argument_group('Layout options (also support --no-xxxx to turn off)')
+    _add_invertable(layout_flags, 'mirror', 'Mirror left/right margins on even/odd pages')
+    _add_invertable(layout_flags, 'smart', 'Smart sort mode')
+    _add_invertable(layout_flags, 'ycenter', 'Center rows vertically within page')
+    _add_invertable(layout_flags, 'xcenter', 'Center rows horizontally within page')
+    _add_invertable(layout_flags, 'xspread', 'Spread images horizontally within rows')
+    _add_invertable(layout_flags, 'yspread', 'Spread rows vertically within pages')
+    _add_invertable(layout_flags, 'scale', 'Scale images within rows to fill width')
+    _add_invertable(layout_flags, 'double', 'Use double-page spreads where possible')
+    _add_invertable(layout_flags, 'double-only', 'Only populate double-page spreads')
+    _add_invertable(layout_flags, 'overfill', 'Overfill pages')
+
+    sort_options = parser.add_argument_group('Sorting options')
+    sort_options.add_argument('--sort', choices=['key', 'date', 'size', 'name', 'rating', 'exif'],
+                              help='Sort order')
+    sort_options.add_argument('--reverse', action='store_true',
+                              help='Reverse image sort order')
+    sort_options.add_argument('--sort_key',
+                              help='Exif field to sort by when --sort=exif specified')
+    sort_options.add_argument('--exiftool', default='exiftool',
+                              help='Location of exiftool (needed if sorting by exif fields')
+
+    misc_options = parser.add_argument_group('Miscellaneous options')
+    misc_options.add_argument('--help', action='help', help='show this help message and exit')
+    misc_options.add_argument('-f', '--force', dest='force', help='Force overwrite',
+                              action='store_true')
+    misc_options.add_argument('--image-list', nargs='+',
+                              help='List of images to add to blur book')
+    misc_options.add_argument('--config', metavar='<jsonfile>', type=jsonfile, action=LoadFromJson,
+                              help='Load options from specified file')
+    misc_options.add_argument('--no-default-config', action='store_true',
+                              help='Do not try to load default configuration')
+
+    if os.path.exists('./flowblurb.json') and '--no-default-config' not in sys.argv:
         args = parser.parse_args(['--config', './flowblurb.json']+sys.argv[1:])
     else:
         args = parser.parse_args()
@@ -401,6 +416,9 @@ def parse_args():
         args.double = True
     if args.sort_key and not args.sort:
         args.sort = 'exif'
+    if args.output and os.path.exists(args.output) and not args.force:
+        print 'Target file %s already exists' % args.output
+        sys.exit()
     return args
 
 def update_blurb(doc, populated):
@@ -513,22 +531,90 @@ def sort_images(images, args):
     else:
         return images
 
+PRESETS = {
+    'small-square': (495, 495, 'square'),
+    'standard-landscape': (693, 594, 'landscape'),
+    'standard-portrait': (585, 738, 'true-portrait'),
+    'large-landscape': (909, 783, 'large-landscape'),
+    'large-square': (855, 864, 'large-square'),
+    'magazine': (621, 810, 'letter')
+}
+
+def initialize_blurb_directory(path, preset):
+    """ Create a blank blurb directory."""
+    width, height, name = PRESETS.get(preset)
+    if not os.path.exists(path):
+        os.makedirs(path)
+    with open(path+'/.version', 'w') as version_file:
+        version_file.write('4\n')
+    project_image = Image.new('RGB', (139, 120), "white") # Size not critical
+    project_image.save(path+'/project_image.jpg')
+    with open(path+'/project_settings.json', 'w') as settings_file:
+        json.dump({"checkoutUrl": "",
+                   "coverType": "imagewrap",
+                   "enhanceImages": False,
+                   "guidelines": {},
+                   "paperType": "standard_paper",
+                   "recentColors": [],
+                   "showGuidelines": False,
+                   "uploadGuids": {
+                       "bbf2ProjectId": "",
+                       "bookId": "",
+                       "coverDesignGuids": [],
+                       "ebookIdReflowable": ""
+                   },
+                   "uploadedReflowable": False,
+                   "version": "1.0"
+                  }, settings_file, indent=4, sort_keys=True)
+    book = ET.Element('book', {'schema':'2.8', 'color':'true',
+                               'width': str(width), 'height': str(height), 'format': name})
+    info = ET.SubElement(book, 'info')
+    ET.SubElement(info, 'title')
+    ET.SubElement(info, 'isbn').text = 'isbnOff'
+    ET.SubElement(info, 'guid').text = str(uuid.uuid4())
+    ET.SubElement(info, 'logo').text = 'white'
+    ET.SubElement(info, 'source', {'version':'1.1.148', 'versionCreatedWith':'1.1.148',
+                                   'branch': 'production'}).text = 'BookWright'
+    ET.SubElement(info, 'bookType').text = 'BlurbBook'
+    masterpage = ET.SubElement(book, 'masterpage')
+    ET.SubElement(masterpage, 'page', {'color': '#ffffff', 'number': '-1'})
+    ET.SubElement(masterpage, 'page', {'color': '#ffffff', 'number': '-1'})
+
+    # Seems that BookWright is happy to create the coers that are appropriate
+    ebook = ET.SubElement(book, 'cover', {'type': 'ebook'})
+    ET.SubElement(ebook, 'coversheet', {'color': '#ffffff',
+                                        'width': str(width), 'height': str(height),})
+
+    section = ET.SubElement(book, 'section', {'name':''})
+    for pageno in range(0, 20):
+        ET.SubElement(section, 'page', {'color':'#00000000', 'number': str(pageno+1)})
+    ET.ElementTree(book).write(path+'/bbf2.xml', pretty_print=True)
+
+def initialize_output_directory(args):
+    """ Check/create output directories. """
+    if args.output_dir:
+        if os.path.exists(args.output_dir) and not args.force:
+            print 'Target directory %s already exists' % args.output_dir
+            sys.exit()
+        shutil.rmtree(args.output_dir)
+        istemp = False
+    else:
+        args.output_dir = tempfile.mkdtemp()
+        istemp = True
+
+    if args.input:
+        extractBlurbFiles.extract(args.input, args.output_dir)
+        create_backup(args.output_dir)
+    else:
+        initialize_blurb_directory(args.output_dir, args.format)
+    return istemp
+
 def main():
     """ Main code. """
     args = parse_args()
-    if args.output and os.path.exists(args.output) and not args.force:
-        print 'Target file %s already exists' % args.target
-        sys.exit()
-    if os.path.isfile(args.target):
-        extracted = tempfile.mkdtemp(prefix=args.target)
-        istemp = True
-        extractBlurbFiles.extract(args.target, extracted)
-    else:
-        extracted = args.target
-        istemp = False
-    create_backup(extracted)
+    istemp = initialize_output_directory(args)
     xml_parser = ET.XMLParser(remove_blank_text=True)
-    doc = ET.parse(extracted+'/bbf2.xml', xml_parser)
+    doc = ET.parse(args.output_dir+'/bbf2.xml', xml_parser)
     if args.page_width == -1:
         args.page_width = float(doc.getroot().get('width'))
     if args.page_height == -1:
@@ -537,7 +623,7 @@ def main():
         args.left = 42 if args.mirror else 28
     used_images = {i.get('src').split('.')[0]:i for i in doc.findall(".//image")}
 
-    media = load_media(extracted, args.image_list)
+    media = load_media(args.output_dir, args.image_list)
     unused = [ImageInfo(name=entry.get('guid'),
                         src=entry.get('src'),
                         modified=entry.get('modified'),
@@ -557,11 +643,11 @@ def main():
     pagenos = [int(page.get('number')) for page in empty_pages(doc)]
     populated = builder.get_pages(pagenos)
     update_blurb(doc, populated)
-    doc.write(extracted+'/bbf2.xml', pretty_print=True)
+    doc.write(args.output_dir+'/bbf2.xml', pretty_print=True)
     if args.output:
-        mergeBlurbFiles.merge(extracted, args.output)
+        mergeBlurbFiles.merge(args.output_dir, args.output)
     if istemp:
-        shutil.rmtree(extracted)
+        shutil.rmtree(args.output_dir)
 
 
 if __name__ == '__main__':
