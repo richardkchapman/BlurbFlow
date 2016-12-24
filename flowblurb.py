@@ -9,11 +9,14 @@ import collections
 import json
 import tempfile
 import shutil
+import subprocess
+from datetime import datetime
+from PIL import Image
 import lxml.etree as ET
 import extractBlurbFiles
 import mergeBlurbFiles
 
-ImageInfo = collections.namedtuple('ImageInfo', ('name', 'src', 'width', 'height'))
+ImageInfo = collections.namedtuple('ImageInfo', ('name', 'src', 'width', 'height', 'modified'))
 ScaledImageInfo = collections.namedtuple('ScaledImageInfo', ('image', 'scale'))
 
 class PageBuilder(object):
@@ -198,6 +201,7 @@ class SmartPageBuilder(PageBuilder):
             allocate best fit or best pair
     """
     def __init__(self, args, images):
+        images = sorted(images, key=lambda image: float(image.width)/image.height, reverse=True)
         super(SmartPageBuilder, self).__init__(args, images)
         self.all_rows = None
         self.mode = 0
@@ -270,10 +274,47 @@ class SmartPageBuilder(PageBuilder):
         self.last_width = page_width
         return super(SmartPageBuilder, self).next_page(page_width, pageno, first)
 
+class ExifTool(object):
+    """ Read exif data using exiftool.
+
+        Derived from a suggestion at
+        http://stackoverflow.com/questions/10075115/call-exiftool-from-a-python-script.
+    """
+    sentinel = "{ready}\n"
+
+    def __init__(self, executable="exiftool"):
+        self.executable = executable
+        self.process = None
+
+    def __enter__(self):
+        self.process = subprocess.Popen(
+            [self.executable, "-stay_open", "True", "-@", "-"],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE)
+        return self
+
+    def  __exit__(self, exc_type, exc_value, traceback):
+        self.process.stdin.write("-stay_open\nFalse\n")
+        self.process.stdin.flush()
+
+    def execute(self, *args):
+        """ Execute an exiftool command. """
+        args = args + ("-execute\n",)
+        self.process.stdin.write(str.join("\n", args))
+        self.process.stdin.flush()
+        output = ""
+        stdout = self.process.stdout.fileno()
+        while not output.endswith(self.sentinel):
+            output += os.read(stdout, 4096)
+        return output[:-len(self.sentinel)]
+
+    def tags(self, filename):
+        """ Return exif data as a dictionary. """
+        return json.loads(self.execute("-G", "-j", "-n", filename))[0]
+
 def find_page(doc, pageno):
     """ Find specific page in blurb document. """
     (element,) = doc.xpath('.//section/page[@number=\'%d\']' % pageno)
-    # Will throw error if not exatly one match.
+    # Will throw error if not exactly one match.
     return element
 
 def empty_pages(doc):
@@ -339,8 +380,17 @@ def parse_args():
                         help='Only populate double-page spreads')
     parser.add_argument('--overfill', action='store_true',
                         help='Overfill pages')
+    parser.add_argument('--sort', choices=['key', 'date', 'size', 'name', 'rating', 'exif'],
+                        help='Sort order')
+    parser.add_argument('--reverse', action='store_true',
+                        help='Reverse image sort order')
+    parser.add_argument('--sort_key',
+                        help='Exif field to sort by when --sort=exif specified')
+    parser.add_argument('--exiftool', default='exiftool',
+                        help='Location of exiftool (needed if sorting by exif fields')
     parser.add_argument('-o', '--output', dest='output', help='Output filename')
     parser.add_argument('-f', '--force', dest='force', help='Force overwrite', action='store_true')
+    parser.add_argument('--image-list', nargs='+')
     parser.add_argument('--config', type=jsonfile, action=LoadFromJson)
     parser.add_argument('target')
     if os.path.exists('./flowblurb.json'):
@@ -349,6 +399,8 @@ def parse_args():
         args = parser.parse_args()
     if args.double_only:
         args.double = True
+    if args.sort_key and not args.sort:
+        args.sort = 'exif'
     return args
 
 def update_blurb(doc, populated):
@@ -384,6 +436,82 @@ def create_backup(extracted):
             break
         next_file += 1
 
+def populate_media(project_dir, media, images):
+    """ Add listed images to the media_registry xml. """
+    (parent,) = media.xpath('./images')
+    changed = False
+    for image_name in images:
+        if not media.xpath('.//images/media[@src=\'%s\']' % image_name):
+            img = Image.open(image_name)
+            width, height = img.size
+            modified = datetime.fromtimestamp(os.path.getmtime(image_name))
+            ext = os.path.splitext(image_name)[1][1:].lower()
+            guid = str(uuid.uuid4())
+            ET.SubElement(parent, 'media', {
+                'src' : image_name,
+                'validated': 'true',
+                'width' : str(width),
+                'height' : str(height),
+                'guid': guid,
+                'modified': modified.isoformat(),
+                'ext': ext,
+                'group': ''
+            })
+            if not os.path.exists("%s/images" % (project_dir)):
+                os.makedirs("%s/images" % (project_dir))
+            shutil.copyfile(image_name, "%s/images/%s.%s" % (project_dir, guid, ext))
+            img.thumbnail((640, 640), Image.ANTIALIAS)
+            if not os.path.exists("%s/thumbnails" % (project_dir)):
+                os.makedirs("%s/thumbnails" % (project_dir))
+            img.save("%s/thumbnails/%s.jpg" % (project_dir, guid))
+            changed = True
+    return changed
+
+def load_media(project_dir, image_list):
+    """ Load and/or populate blurb media registry. """
+    if os.path.isfile(project_dir+'/media_registry.xml'):
+        media = ET.parse(project_dir+'/media_registry.xml')
+    else:
+        root = ET.Element('medialist')
+        for elem in ['images', 'video', 'audio', 'text']:
+            ET.SubElement(root, elem)
+        media = ET.ElementTree(root)
+    if image_list and populate_media(project_dir, media, image_list):
+        media.write(project_dir+'/media_registry.xml', pretty_print=True)
+    return media
+
+def get_exif(imgfile):
+    """ Read exif info using exiftool. """
+    print "get_exif('%s')" % imgfile
+    tags = {}
+    pipe = os.popen('exiftool \"' + imgfile + '\"')
+    for line in pipe:
+        the_split = line.split(' :')
+        if len(the_split) != 2:
+            the_split = line.split(':')
+        tags[the_split[0].strip()] = the_split[1].strip()
+    pipe.close()
+    return tags
+
+def sort_images(images, args):
+    """ Sort images according to requested order. """
+    if args.sort:
+        if args.sort == 'name':
+            return sorted(images, key=lambda image: image.src)
+        elif args.sort == 'date':
+            return sorted(images, key=lambda image: image.modified)
+        elif args.sort == 'size':
+            return sorted(images, key=lambda image: int(image.width)*int(image.height))
+        elif args.sort == 'rating':
+            args.sort_key = 'XMP:Rating'
+            args.sort = 'exif'
+        if args.sort == 'exif' and args.sort_key:
+            with ExifTool(executable=args.exiftool) as exiftool:
+                return sorted(images,
+                              key=lambda image: exiftool.tags(image.src).get(args.sort_key, None))
+    else:
+        return images
+
 def main():
     """ Main code. """
     args = parse_args()
@@ -408,19 +536,21 @@ def main():
         args.left = 42 if args.mirror else 28
     used_images = {i.get('src').split('.')[0]:i for i in doc.findall(".//image")}
 
-    media = ET.parse(extracted+'/media_registry.xml')
+    media = load_media(extracted, args.image_list)
     unused = [ImageInfo(name=entry.get('guid'),
                         src=entry.get('src'),
+                        modified=entry.get('modified'),
                         width=int(entry.get('width')),
                         height=int(entry.get('height')))
               for entry in media.findall("./images/media")
               if not entry.get('guid') in used_images]
 
     if args.smart:
-        unused.sort(key=lambda image: float(image.width)/image.height, reverse=True)
         builder = SmartPageBuilder(args, unused)
     else:
-        unused.sort(key=lambda image: image.src)
+        unused = sort_images(unused, args)
+        if args.reverse:
+            unused = unused[::-1]
         builder = PageBuilder(args, unused)  # pylint: disable=I0011,R0204
 
     pagenos = [int(page.get('number')) for page in empty_pages(doc)]
