@@ -441,6 +441,7 @@ def populate_media(project_dir, media, images):
     (parent,) = media.xpath('./images')
     changed = False
     for image_name in images:
+        image_name = os.path.abspath(image_name)
         if not media.xpath('.//images/media[@src=\'%s\']' % image_name):
             img = Image.open(image_name)
             width, height = img.size
