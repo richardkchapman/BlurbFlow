@@ -371,10 +371,23 @@ def update_blurb(doc, populated):
             del container.attrib['name']
             del container.attrib['scale']
 
+def create_backup(extracted):
+    """ Create a backup of the bbf2.xml in old_bbfs/bbf2_000000000<n>.xml """
+    backup_path = extracted + "/old_bbfs"
+    if not os.path.exists(backup_path):
+        os.makedirs(backup_path)
+    next_file = 1
+    while True:
+        backup_file = "%s/bbf2_%.10d.xml" % (backup_path, next_file)
+        if not os.path.exists(backup_file):
+            shutil.copyfile(extracted+"/bbf2.xml", backup_file)
+            break
+        next_file += 1
+
 def main():
     """ Main code. """
     args = parse_args()
-    if os.path.exists(args.output) and not args.force:
+    if args.output and os.path.exists(args.output) and not args.force:
         print 'Target file %s already exists' % args.target
         sys.exit()
     if os.path.isfile(args.target):
@@ -384,6 +397,7 @@ def main():
     else:
         extracted = args.target
         istemp = False
+    create_backup(extracted)
     xml_parser = ET.XMLParser(remove_blank_text=True)
     doc = ET.parse(extracted+'/bbf2.xml', xml_parser)
     if args.page_width == -1:
