@@ -135,7 +135,7 @@ class PageBuilder(object):
 
     def _unget_all_row(self, row):
         if row:
-            for i in row:
+            for i in reversed(row):
                 self.images.append(i.image)
 
     def _unget_row(self, row):
@@ -290,11 +290,13 @@ class ExifTool(object):
     def __init__(self, executable="exiftool"):
         self.executable = executable
         self.process = None
+        self.missing_tags = 0
 
     def __enter__(self):
         self.process = subprocess.Popen(
             [self.executable, "-stay_open", "True", "-@", "-"],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE)
+        self.missing_tags = 0
         return self
 
     def  __exit__(self, exc_type, exc_value, traceback):
@@ -315,6 +317,13 @@ class ExifTool(object):
     def tags(self, filename):
         """ Return exif data as a dictionary. """
         return json.loads(self.execute("-G", "-j", "-n", filename))[0]
+
+    def get_tag(self, filename, tag):
+        """ Return single exif tag. """
+        ret = self.tags(filename).get(tag, None)
+        if not ret:
+            self.missing_tags += 1
+        return ret
 
 def find_page(doc, pageno):
     """ Find or create specific page in blurb document. """
@@ -358,7 +367,9 @@ def parse_args():                         # pylint: disable=I0011,R0915
         parser.add_argument('--'+name, dest=dest, action='store_true', help=help_string)
         parser.add_argument('--no-'+name, dest=dest, action='store_false', help=argparse.SUPPRESS)
 
-    parser = argparse.ArgumentParser(description='Update blurb files', add_help=False)
+    parser = argparse.ArgumentParser(description='Update blurb files',
+                                     fromfile_prefix_chars='@',
+                                     add_help=False)
     required = parser.add_argument_group('Required arguments (at least one of...)')
     required.add_argument('--input', type=argparse.FileType('r'),
                           help='Input blurb file')
@@ -386,6 +397,8 @@ def parse_args():                         # pylint: disable=I0011,R0915
                           help='Bottom margin')
     optional.add_argument('--format', choices=sorted(PRESETS.keys()),
                           default='large-landscape', help='Blurb book layout if creating new book')
+    optional.add_argument('--paper', choices=PAPERS,
+                          default='standard', help='Blurb paper choiceif creating new book')
 
     layout_flags = parser.add_argument_group('Layout options (also support --no-xxxx to turn off)')
     _add_invertable(layout_flags, 'mirror', 'Mirror left/right margins on even/odd pages')
@@ -401,12 +414,10 @@ def parse_args():                         # pylint: disable=I0011,R0915
     _add_invertable(layout_flags, 'add-pages', 'Add pages to existing book if nececssary')
 
     sort_options = parser.add_argument_group('Sorting options')
-    sort_options.add_argument('--sort', choices=['key', 'date', 'size', 'name', 'rating', 'exif'],
+    sort_options.add_argument('--sort',
                               help='Sort order')
     sort_options.add_argument('--reverse', action='store_true',
                               help='Reverse image sort order')
-    sort_options.add_argument('--sort_key',
-                              help='Exif field to sort by when --sort=exif specified')
     sort_options.add_argument('--exiftool', default='exiftool',
                               help='Location of exiftool (needed if sorting by exif fields')
 
@@ -418,6 +429,8 @@ def parse_args():                         # pylint: disable=I0011,R0915
                               help='Load options from specified file')
     misc_options.add_argument('--no-default-config', action='store_true',
                               help='Do not try to load default configuration')
+    misc_options.add_argument('--max-page', type=int, default=240,
+                              help='Maximum page number')
 
     positional_options = parser.add_argument_group('Positional arguments')
     positional_options.add_argument('image_list', metavar='<image-file>', nargs='+',
@@ -429,8 +442,6 @@ def parse_args():                         # pylint: disable=I0011,R0915
         args = parser.parse_args()
     if args.double_only:
         args.double = True
-    if args.sort_key and not args.sort:
-        args.sort = 'exif'
     if args.output and os.path.exists(args.output) and not args.force:
         print 'Target file %s already exists' % args.output
         sys.exit()
@@ -527,19 +538,6 @@ def load_media(project_dir, image_list):
         media.write(project_dir+'/media_registry.xml', pretty_print=True)
     return media
 
-def get_exif(imgfile):
-    """ Read exif info using exiftool. """
-    print "get_exif('%s')" % imgfile
-    tags = {}
-    pipe = os.popen('exiftool \"' + imgfile + '\"')
-    for line in pipe:
-        the_split = line.split(' :')
-        if len(the_split) != 2:
-            the_split = line.split(':')
-        tags[the_split[0].strip()] = the_split[1].strip()
-    pipe.close()
-    return tags
-
 def sort_images(images, args):
     """ Sort images according to requested order. """
     if args.sort:
@@ -549,13 +547,17 @@ def sort_images(images, args):
             return sorted(images, key=lambda image: image.modified)
         elif args.sort == 'size':
             return sorted(images, key=lambda image: int(image.width)*int(image.height))
-        elif args.sort == 'rating':
-            args.sort_key = 'XMP:Rating'
-            args.sort = 'exif'
-        if args.sort == 'exif' and args.sort_key:
+        else:
+            if args.sort == 'rating':
+                args.sort = 'XMP:Rating'
+            print 'Sorting by exiftool field %s' % args.sort
             with ExifTool(executable=args.exiftool) as exiftool:
-                return sorted(images,
-                              key=lambda image: exiftool.tags(image.src).get(args.sort_key, None))
+                images = sorted(images,
+                                key=lambda image: exiftool.get_tag(image.src, args.sort))
+                if exiftool.missing_tags:
+                    print 'Warning: exif tag %s not found in %d of %d images' % \
+                          (args.sort, exiftool.missing_tags, len(images))
+                return images
     else:
         return images
 
@@ -568,9 +570,11 @@ PRESETS = {
     'magazine': (621, 810, 'letter')
 }
 
-def initialize_blurb_directory(path, preset):
+PAPERS= [ 'standard', 'premium_lustre', 'premium_matte', 'pro_medium_gloss', 'pro_uncoated' ]
+
+def initialize_blurb_directory(path, args):
     """ Create a blank blurb directory."""
-    width, height, name = PRESETS.get(preset)
+    width, height, name = PRESETS.get(args.format)
     if not os.path.exists(path):
         os.makedirs(path)
     with open(path+'/.version', 'w') as version_file:
@@ -582,7 +586,7 @@ def initialize_blurb_directory(path, preset):
                    "coverType": "imagewrap",
                    "enhanceImages": False,
                    "guidelines": {},
-                   "paperType": "standard_paper",
+                   "paperType": args.paper+'_paper',
                    "recentColors": [],
                    "showGuidelines": False,
                    "uploadGuids": {
@@ -634,7 +638,7 @@ def initialize_output_directory(args):
         extractBlurbFiles.extract(args.input, args.output_dir)
         create_backup(args.output_dir)
     else:
-        initialize_blurb_directory(args.output_dir, args.format)
+        initialize_blurb_directory(args.output_dir, args)
     return istemp
 
 def main():
@@ -670,7 +674,7 @@ def main():
 
     pagenos = [int(page.get('number')) for page in empty_pages(doc)]
     if args.add_pages or not args.input:
-        pagenos.extend(range(last_page(doc), 240))
+        pagenos.extend(range(last_page(doc), args.max_page))
     populated = builder.get_pages(pagenos)
     update_blurb(doc, populated)
     doc.write(args.output_dir+'/bbf2.xml', pretty_print=True)
