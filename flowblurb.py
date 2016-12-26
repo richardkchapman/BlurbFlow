@@ -161,8 +161,11 @@ class PageBuilder(object):
             if page_rows or not self.args.overfill or first:
                 height += row_height + self.args.yspace
             page_rows.append(next_row)
-        height -= self.args.yspace
-        return self._generate_page(page_width, page_rows, pageno, first)
+        if height:
+            height -= self.args.yspace
+            return self._generate_page(page_width, page_rows, pageno, first)
+        else:
+            return None
 
     def get_pages(self, pagenos):
         """ Return a page for each page nuber provided."""
@@ -187,6 +190,8 @@ class PageBuilder(object):
                 first = False
                 if populated:
                     yield (populated, pageno, double)
+                else:
+                    break
 
 class SmartPageBuilder(PageBuilder):
     """ Populate images onto pages, trying to do so intelligently.
@@ -312,16 +317,23 @@ class ExifTool(object):
         return json.loads(self.execute("-G", "-j", "-n", filename))[0]
 
 def find_page(doc, pageno):
-    """ Find specific page in blurb document. """
-    (element,) = doc.xpath('.//section/page[@number=\'%d\']' % pageno)
-    # Will throw error if not exactly one match.
-    return element
+    """ Find or create specific page in blurb document. """
+    matches = doc.xpath('.//section/page[@number=\'%d\']' % pageno)
+    if matches:
+        return matches[0]
+    section = doc.xpath('.//section')[-1]
+    return ET.SubElement(section, 'page', {'color':'#00000000', 'number': str(pageno)})
 
 def empty_pages(doc):
     """ Returns all empty pages in the original Blurb doc. """
     for page in doc.findall('.//section/page'):
         if not page.findall('container'):
             yield page
+
+def last_page(doc):
+    """ Returns last page no in the original Blurb doc. """
+    pages = doc.xpath('.//section/page')
+    return int(pages[-1].get('number'))
 
 def parse_args():                         # pylint: disable=I0011,R0915
     """ Command line parsing code"""
@@ -347,9 +359,9 @@ def parse_args():                         # pylint: disable=I0011,R0915
         parser.add_argument('--no-'+name, dest=dest, action='store_false', help=argparse.SUPPRESS)
 
     parser = argparse.ArgumentParser(description='Update blurb files', add_help=False)
-    required = parser.add_argument_group('Required arguments')
+    required = parser.add_argument_group('Required arguments (at least one of...)')
     required.add_argument('--input', type=argparse.FileType('r'),
-                          help='Input blurb file', required=True)
+                          help='Input blurb file')
     required.add_argument('--output', help='Output blurb file')
     required.add_argument('--output-dir', help='Output unpacked blurb directory')
 
@@ -358,7 +370,7 @@ def parse_args():                         # pylint: disable=I0011,R0915
                           help='Maximum height of a page (default: read from blurb doc)')
     optional.add_argument('-w', '--width', dest='page_width', metavar='N', type=float, default=-1,
                           help='Maximum width of a page (default: read from blurb doc)')
-    optional.add_argument('--imageHeight', dest='image_height', metavar='N', type=float,
+    optional.add_argument('--image-height', metavar='N', type=float,
                           default=200.0, help='Minimum height of an image (default: %(default).0f)')
     optional.add_argument('--xspace', dest='xspace', metavar='N', type=float, default=0.0,
                           help='X gap between images (default: %(default).0f)')
@@ -386,6 +398,7 @@ def parse_args():                         # pylint: disable=I0011,R0915
     _add_invertable(layout_flags, 'double', 'Use double-page spreads where possible')
     _add_invertable(layout_flags, 'double-only', 'Only populate double-page spreads')
     _add_invertable(layout_flags, 'overfill', 'Overfill pages')
+    _add_invertable(layout_flags, 'add-pages', 'Add pages to existing book if nececssary')
 
     sort_options = parser.add_argument_group('Sorting options')
     sort_options.add_argument('--sort', choices=['key', 'date', 'size', 'name', 'rating', 'exif'],
@@ -401,12 +414,14 @@ def parse_args():                         # pylint: disable=I0011,R0915
     misc_options.add_argument('--help', action='help', help='show this help message and exit')
     misc_options.add_argument('-f', '--force', dest='force', help='Force overwrite',
                               action='store_true')
-    misc_options.add_argument('--image-list', nargs='+',
-                              help='List of images to add to blur book')
     misc_options.add_argument('--config', metavar='<jsonfile>', type=jsonfile, action=LoadFromJson,
                               help='Load options from specified file')
     misc_options.add_argument('--no-default-config', action='store_true',
                               help='Do not try to load default configuration')
+
+    positional_options = parser.add_argument_group('Positional arguments')
+    positional_options.add_argument('image_list', metavar='<image-file>', nargs='+',
+                                    help='Image to add to blur book')
 
     if os.path.exists('./flowblurb.json') and '--no-default-config' not in sys.argv:
         args = parser.parse_args(['--config', './flowblurb.json']+sys.argv[1:])
@@ -418,6 +433,11 @@ def parse_args():                         # pylint: disable=I0011,R0915
         args.sort = 'exif'
     if args.output and os.path.exists(args.output) and not args.force:
         print 'Target file %s already exists' % args.output
+        sys.exit()
+    if not args.output:
+        args.output = args.input
+    if not (args.output or args.output_dir):
+        print 'No target specified'
         sys.exit()
     return args
 
@@ -454,6 +474,14 @@ def create_backup(extracted):
             break
         next_file += 1
 
+def link_or_copy(source, dest):
+    """ Symlink a file if we can, else copy it."""
+    os_symlink = getattr(os, "symlink", None)
+    if callable(os_symlink):
+        os_symlink(source, dest)
+    else:
+        shutil.copyfile(source, dest)
+
 def populate_media(project_dir, media, images):
     """ Add listed images to the media_registry xml. """
     (parent,) = media.xpath('./images')
@@ -478,7 +506,7 @@ def populate_media(project_dir, media, images):
             })
             if not os.path.exists("%s/images" % (project_dir)):
                 os.makedirs("%s/images" % (project_dir))
-            shutil.copyfile(image_name, "%s/images/%s.%s" % (project_dir, guid, ext))
+            link_or_copy(image_name, "%s/images/%s.%s" % (project_dir, guid, ext))
             img.thumbnail((640, 640), Image.ANTIALIAS)
             if not os.path.exists("%s/thumbnails" % (project_dir)):
                 os.makedirs("%s/thumbnails" % (project_dir))
@@ -641,6 +669,8 @@ def main():
         builder = PageBuilder(args, unused)  # pylint: disable=I0011,R0204
 
     pagenos = [int(page.get('number')) for page in empty_pages(doc)]
+    if args.add_pages or not args.input:
+        pagenos.extend(range(last_page(doc), 240))
     populated = builder.get_pages(pagenos)
     update_blurb(doc, populated)
     doc.write(args.output_dir+'/bbf2.xml', pretty_print=True)
