@@ -10,6 +10,7 @@ import json
 import tempfile
 import shutil
 import subprocess
+import random
 from datetime import datetime
 from PIL import Image
 import lxml.etree as ET
@@ -25,7 +26,6 @@ class PageBuilder(object):
         self.args = args
         self.images = images[::-1] # reverses the list, not in-place
         self.page_height = args.page_height-(args.top+args.bottom)
-        #self.page_width = args.page_width-(args.left+args.right)
 
     def _row_width(self, row):
         num_deltas = len(row)-1
@@ -97,6 +97,12 @@ class PageBuilder(object):
         scaledh = self.args.image_height
         return (scaledw, scaledh)
 
+    def _row_scale(self, row_width, page_width, row):
+        whitespace = (len(row)-1) * self.args.xspace
+        target_width = page_width - whitespace
+        row_width -= whitespace
+        return target_width/row_width
+
     def _get_row(self, page_width):
         row_width = 0
         row = []
@@ -117,10 +123,7 @@ class PageBuilder(object):
                     # Required scale is what it takes to turn the current row width
                     # into the desired row width, but ignoring the whitespace which is not scaled
                     if self.args.scale:
-                        whitespace = (len(row)-1) * self.args.xspace
-                        target_width = page_width - whitespace
-                        row_width -= whitespace
-                        scale = target_width/row_width
+                        scale = self._row_scale(row_width, page_width, row)
                         return [ScaledImageInfo(image=i.image, scale=i.scale*scale)
                                 for i in row]
                     else:
@@ -131,7 +134,15 @@ class PageBuilder(object):
                     scaledh = height * scaledw/width
             row.append(ScaledImageInfo(image, scaledh/height))
             row_width += scaledw + self.args.xspace
-        return row if row else None
+        # leftover images are left unscaled unless the scale required to fill the row is small
+        if row:
+            scale = self._row_scale(row_width, page_width, row)
+            if scale > 1.2:
+                scale = 1.0
+            return [ScaledImageInfo(image=i.image, scale=i.scale*scale)
+                    for i in row]
+        else:
+            return None
 
     def _unget_all_row(self, row):
         if row:
@@ -186,12 +197,17 @@ class PageBuilder(object):
             else:
                 page_width = self.args.page_width-(self.args.left+self.args.right)
             if double or not self.args.double_only:
-                populated = self.next_page(page_width, pageno, first)
-                first = False
-                if populated:
-                    yield (populated, pageno, double)
-                else:
-                    break
+                if (pageno % 2 == 0 and self.args.even_only) or \
+                   (pageno % 2 == 1 and self.args.odd_only) or \
+                   not (self.args.odd_only or self.args.even_only):
+                    populated = self.next_page(page_width, pageno, first)
+                    first = False
+                    if populated:
+                        del pagenos[0:i]
+                        i = 0
+                        yield (populated, pageno, double)
+                    else:
+                        break
 
 class SmartPageBuilder(PageBuilder):
     """ Populate images onto pages, trying to do so intelligently.
@@ -242,7 +258,8 @@ class SmartPageBuilder(PageBuilder):
                 if next_row is None:
                     break
                 self.all_rows.append(next_row)
-            self.last_row = self.all_rows.pop() if self.all_rows else None
+            if self.all_rows and self._row_width(self.all_rows[-1]) < page_width*0.75:
+                self.last_row = self.all_rows.pop()
             self.all_rows.sort(key=lambda row: row[0].image.height * row[0].scale)
         # Pick rows from tall, wide, middle in turn, forcing the last (incomplete)
         # row to remain last
@@ -331,6 +348,10 @@ def find_page(doc, pageno):
     if matches:
         return matches[0]
     section = doc.xpath('.//section')[-1]
+    # we need to create the page, but we also need to create any pages between the
+    # last page and this one
+    for page in range(last_page(doc), pageno-1):
+        ET.SubElement(section, 'page', {'color':'#00000000', 'number': str(page)})
     return ET.SubElement(section, 'page', {'color':'#00000000', 'number': str(pageno)})
 
 def empty_pages(doc):
@@ -352,6 +373,7 @@ def parse_args():                         # pylint: disable=I0011,R0915
         def __call__(self, parser, namespace, values, option_string=None):
             for key, value in values.iteritems():
                 if key != option_string.lstrip('-'):
+                    key = key.replace('-', '_')
                     setattr(namespace, key, value)
 
     def jsonfile(filename):
@@ -398,7 +420,9 @@ def parse_args():                         # pylint: disable=I0011,R0915
     optional.add_argument('--format', choices=sorted(PRESETS.keys()),
                           default='large-landscape', help='Blurb book layout if creating new book')
     optional.add_argument('--paper', choices=PAPERS,
-                          default='standard', help='Blurb paper choiceif creating new book')
+                          default='standard', help='Blurb paper choice if creating new book')
+    optional.add_argument('--import-only', action='store_true',
+                          help='Import images only, do not layout')
 
     layout_flags = parser.add_argument_group('Layout options (also support --no-xxxx to turn off)')
     _add_invertable(layout_flags, 'mirror', 'Mirror left/right margins on even/odd pages')
@@ -410,16 +434,36 @@ def parse_args():                         # pylint: disable=I0011,R0915
     _add_invertable(layout_flags, 'scale', 'Scale images within rows to fill width')
     _add_invertable(layout_flags, 'double', 'Use double-page spreads where possible')
     _add_invertable(layout_flags, 'double-only', 'Only populate double-page spreads')
+    _add_invertable(layout_flags, 'odd-only', 'Only populate odd-numbered pages')
+    _add_invertable(layout_flags, 'even-only', 'Only populate even-numbered pages')
     _add_invertable(layout_flags, 'overfill', 'Overfill pages')
-    _add_invertable(layout_flags, 'add-pages', 'Add pages to existing book if nececssary')
+    _add_invertable(layout_flags, 'add-pages', 'Add pages to existing book if necessary')
 
     sort_options = parser.add_argument_group('Sorting options')
+    sort_options.add_argument('--random', action='store_true',
+                              help='Shuffle images')
     sort_options.add_argument('--sort',
                               help='Sort order')
     sort_options.add_argument('--reverse', action='store_true',
                               help='Reverse image sort order')
     sort_options.add_argument('--exiftool', default='exiftool',
                               help='Location of exiftool (needed if sorting by exif fields')
+
+    section_options = parser.add_argument_group('Miscellaneous options')
+    section_options.add_argument("--sections", metavar='<section-name>', nargs='+',
+                                 help='Names/order of sections to include')
+    section_options.add_argument("--section-field", metavar='<exif-tag>',
+                                 help='Exif tag used for sections')
+    section_options.add_argument("--section-start", choices=['any', 'even', 'odd'],
+                                 default='any', help='Where to start new sections')
+    section_options.add_argument("--section-blank-start", type=int,
+                                 help='Number of blank pages to leave at start of section')
+    section_options.add_argument("--section-blank-end", type=int,
+                                 help='Number of blank pages to leave at end of section')
+    section_options.add_argument("--section-add-title", action='store_true',
+                                 help='Add a title page before this section')
+    section_options.add_argument("--section-title",
+                                 help='Title for this section')
 
     misc_options = parser.add_argument_group('Miscellaneous options')
     misc_options.add_argument('--help', action='help', help='show this help message and exit')
@@ -540,6 +584,8 @@ def load_media(project_dir, image_list):
 
 def sort_images(images, args):
     """ Sort images according to requested order. """
+    if args.random:
+        random.shuffle(images)
     if args.sort:
         if args.sort == 'name':
             return sorted(images, key=lambda image: image.src)
@@ -570,7 +616,7 @@ PRESETS = {
     'magazine': (621, 810, 'letter')
 }
 
-PAPERS= [ 'standard', 'premium_lustre', 'premium_matte', 'pro_medium_gloss', 'pro_uncoated' ]
+PAPERS = ['standard', 'premium_lustre', 'premium_matte', 'pro_medium_gloss', 'pro_uncoated']
 
 def initialize_blurb_directory(path, args):
     """ Create a blank blurb directory."""
@@ -625,10 +671,11 @@ def initialize_blurb_directory(path, args):
 def initialize_output_directory(args):
     """ Check/create output directories. """
     if args.output_dir:
-        if os.path.exists(args.output_dir) and not args.force:
-            print 'Target directory %s already exists' % args.output_dir
-            sys.exit()
-        shutil.rmtree(args.output_dir)
+        if os.path.exists(args.output_dir):
+            if not args.force:
+                print 'Target directory %s already exists' % args.output_dir
+                sys.exit()
+            shutil.rmtree(args.output_dir)
         istemp = False
     else:
         args.output_dir = tempfile.mkdtemp()
@@ -640,6 +687,75 @@ def initialize_output_directory(args):
     else:
         initialize_blurb_directory(args.output_dir, args)
     return istemp
+
+def find_sections(args, images):
+    """ Map images to sections using specified exif field. """
+    sections = {}
+    with ExifTool(executable=args.exiftool) as exiftool:
+        for image in images:
+            this_section = exiftool.get_tag(image.src, args.section_field)
+            if this_section in sections:
+                sections[this_section].append(image)
+            else:
+                sections[this_section] = [image]
+    return sections
+
+def add_title_page(doc, args, pageno):
+    """ Add a section title page. """
+    page = find_page(doc, pageno)
+    title = args.section_title
+    container = ET.SubElement(page, 'container', {
+        "transform": "1 0 0 1", "type": "text",
+        "x": str(args.left if pageno%2 == 0 else args.right),
+        "y": str(args.top),
+        "width": str(args.page_width-(args.left+args.right)),
+        "height": str(args.page_height-(args.top+args.bottom))
+        })
+    text = ET.SubElement(container, 'text', {'valign': 'middle'})
+    text.text = '<p class="align-center line-height-qt">' \
+                 '<span class="font-arial" data-ascent="26px" data-descent="9.03px" ' \
+                 'style="font-size:24px;color:#000000;">%s</span></p>' % title
+
+def populate_section(doc, args, pagenos, images):
+    """ Populate all images for a single section. """
+    images = sort_images(images, args)
+    if args.smart:
+        builder = SmartPageBuilder(args, images)
+    else:
+        if args.reverse:
+            images = images[::-1]
+        builder = PageBuilder(args, images)  # pylint: disable=I0011,R0204
+    if args.section_start == 'even':
+        while pagenos and (pagenos[0] % 2 == 1):
+            pagenos.pop(0)
+    elif args.section_start == 'odd':
+        while pagenos and (pagenos[0] % 2 == 0):
+            pagenos.pop(0)
+    if args.section_add_title:
+        add_title_page(doc, args, pagenos.pop(0))
+    if args.section_blank_start:
+        del pagenos[0:args.section_blank_start]
+    populated = builder.get_pages(pagenos)
+    if args.section_blank_end:
+        del pagenos[0:args.section_blank_end]
+    update_blurb(doc, populated)
+
+def populate_sections(doc, args, pagenos, images):
+    """ Populate all images for multiple sections. """
+    sections_map = find_sections(args, images)
+    if not args.sections:
+        args.sections = sorted(sections_map.keys())
+    for section in args.sections:
+        if section in sections_map:
+            section_args = argparse.Namespace(**vars(args))
+            setattr(section_args, 'section_title', section)
+            if os.path.isfile(section+'.json'):
+                with open(section+'.json') as json_data:
+                    new_args = json.load(json_data)
+                    for key, value in new_args.iteritems():
+                        key = key.replace('-', '_')
+                        setattr(section_args, key, value)
+            populate_section(doc, section_args, pagenos, sections_map[section])
 
 def main():
     """ Main code. """
@@ -656,27 +772,21 @@ def main():
     used_images = {i.get('src').split('.')[0]:i for i in doc.findall(".//image")}
 
     media = load_media(args.output_dir, args.image_list)
-    unused = [ImageInfo(name=entry.get('guid'),
-                        src=entry.get('src'),
-                        modified=entry.get('modified'),
-                        width=int(entry.get('width')),
-                        height=int(entry.get('height')))
-              for entry in media.findall("./images/media")
-              if not entry.get('guid') in used_images]
-
-    if args.smart:
-        builder = SmartPageBuilder(args, unused)
-    else:
-        unused = sort_images(unused, args)
-        if args.reverse:
-            unused = unused[::-1]
-        builder = PageBuilder(args, unused)  # pylint: disable=I0011,R0204
-
-    pagenos = [int(page.get('number')) for page in empty_pages(doc)]
-    if args.add_pages or not args.input:
-        pagenos.extend(range(last_page(doc), args.max_page))
-    populated = builder.get_pages(pagenos)
-    update_blurb(doc, populated)
+    if not args.import_only:
+        unused = [ImageInfo(name=entry.get('guid'),
+                            src=entry.get('src'),
+                            modified=entry.get('modified'),
+                            width=int(entry.get('width')),
+                            height=int(entry.get('height')))
+                  for entry in media.findall("./images/media")
+                  if not entry.get('guid') in used_images]
+        pagenos = [int(page.get('number')) for page in empty_pages(doc)]
+        if args.add_pages or not args.input:
+            pagenos.extend(range(last_page(doc)+1, args.max_page))
+        if args.section_field:
+            populate_sections(doc, args, pagenos, unused)
+        else:
+            populate_section(doc, args, pagenos, unused)
     doc.write(args.output_dir+'/bbf2.xml', pretty_print=True)
     if args.output:
         mergeBlurbFiles.merge(args.output_dir, args.output)
