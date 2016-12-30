@@ -59,7 +59,7 @@ class PageBuilder(object):
                 y += (self.page_height - current_page_height)/2
         return (y, yspace)
 
-    def _generate_page(self, page_width, rows, pageno, first):
+    def _generate_page(self, page_width, rows, pageno, first, last):  # pylint: disable=I0011,R0913,W0613
         page = []
         y, yspace = self._calc_y_position(rows, first)
         for row in rows:
@@ -155,10 +155,12 @@ class PageBuilder(object):
     def next_page(self, page_width, pageno, first):
         """ Get a page from the image list. """
         height = 0
+        last = False
         page_rows = []
         while True:
             next_row = self._get_row(page_width)
             if next_row is None:
+                last = True
                 break
             row_height = next_row[0].image.height * next_row[0].scale
             if row_height + height > self.page_height:
@@ -174,7 +176,7 @@ class PageBuilder(object):
             page_rows.append(next_row)
         if height:
             height -= self.args.yspace
-            return self._generate_page(page_width, page_rows, pageno, first)
+            return self._generate_page(page_width, page_rows, pageno, first, last)
         else:
             return None
 
@@ -230,18 +232,23 @@ class SmartPageBuilder(PageBuilder):
         self.next_row = []
         self.last_width = 0
 
-    def _generate_page(self, page_width, rows, pageno, first):
+    def _generate_page(self, page_width, rows, pageno, first, last):   # pylint: disable=I0011,R0913
         if not self.args.scale:
-            # sort the rows to a more pleasing order - wide in the middle
+            # sort the rows to a more pleasing order - wide in the middle,
+            # narrowest at the bottom
             rows.sort(key=self._row_width, reverse=True)
+            if last:
+                last_row = rows.pop()
             new_rows = []
             for row in rows:
                 if len(new_rows) % 2:
                     new_rows.append(row)
                 else:
                     new_rows.insert(0, row)
+            if last:
+                new_rows.append(last_row)
             rows = new_rows
-        return super(SmartPageBuilder, self)._generate_page(page_width, rows, pageno, first)
+        return super(SmartPageBuilder, self)._generate_page(page_width, rows, pageno, first, last)
 
     def _preferred_size(self, width, height, image):
         """ What width/height would make this image have area self.image_height^2"""
@@ -464,6 +471,10 @@ def parse_args():                         # pylint: disable=I0011,R0915
                                  help='Add a title page before this section')
     section_options.add_argument("--section-title",
                                  help='Title for this section')
+    section_options.add_argument("--section-title-font", default='arial',
+                                 help='Font for this section\'s title')
+    section_options.add_argument("--section-title-fontsize", type=int, default=48,
+                                 help='Font size for this section\'s title')
 
     misc_options = parser.add_argument_group('Miscellaneous options')
     misc_options.add_argument('--help', action='help', help='show this help message and exit')
@@ -706,15 +717,16 @@ def add_title_page(doc, args, pageno):
     title = args.section_title
     container = ET.SubElement(page, 'container', {
         "transform": "1 0 0 1", "type": "text",
-        "x": str(args.left if pageno%2 == 0 else args.right),
+        "x": str(args.right if pageno%2 == 0 else args.left),
         "y": str(args.top),
         "width": str(args.page_width-(args.left+args.right)),
         "height": str(args.page_height-(args.top+args.bottom))
         })
     text = ET.SubElement(container, 'text', {'valign': 'middle'})
     text.text = '<p class="align-center line-height-qt">' \
-                 '<span class="font-arial" data-ascent="26px" data-descent="9.03px" ' \
-                 'style="font-size:24px;color:#000000;">%s</span></p>' % title
+                 '<span class="font-%s" ' \
+                 'style="font-size:%dpx;color:#000000;">%s</span></p>' % \
+                 (args.section_title_font, args.section_title_fontsize, title)
 
 def populate_section(doc, args, pagenos, images):
     """ Populate all images for a single section. """
