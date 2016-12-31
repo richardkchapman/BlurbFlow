@@ -181,7 +181,7 @@ class PageBuilder(object):
             return None
 
     def get_pages(self, pagenos):
-        """ Return a page for each page nuber provided."""
+        """ Return a page for each page number provided."""
         i = 0
         first = True
         while i < len(pagenos):
@@ -210,6 +210,12 @@ class PageBuilder(object):
                         yield (populated, pageno, double)
                     else:
                         break
+
+    def get_page_count(self, pagenos):
+        """ Return nuber of pages that this builder would create. Note that this is
+            destructive in that the builder is not usable afterwards. """
+        pages = self.get_pages(pagenos[:])
+        return sum(1 for _ in pages)
 
 class SmartPageBuilder(PageBuilder):
     """ Populate images onto pages, trying to do so intelligently.
@@ -356,10 +362,16 @@ def find_page(doc, pageno):
         return matches[0]
     section = doc.xpath('.//section')[-1]
     # we need to create the page, but we also need to create any pages between the
-    # last page and this one
-    for page in range(last_page(doc), pageno-1):
+    # last page and this one, and ensure that we end on an even page.
+    # Spreads are also an issue - if the page we are looking for is not there
+    # because the page before was a double-spread, then something has gone wrong and we
+    # should fail
+    last = last_page(doc)
+    if pageno < last:
+        raise RuntimeError('Unexpected page number')
+    for page in range(last+1, (pageno+1)/2 * 2 + 1):
         ET.SubElement(section, 'page', {'color':'#00000000', 'number': str(page)})
-    return ET.SubElement(section, 'page', {'color':'#00000000', 'number': str(pageno)})
+    return find_page(doc, pageno)
 
 def empty_pages(doc):
     """ Returns all empty pages in the original Blurb doc. """
@@ -400,8 +412,7 @@ def parse_args():                         # pylint: disable=I0011,R0915
                                      fromfile_prefix_chars='@',
                                      add_help=False)
     required = parser.add_argument_group('Required arguments (at least one of...)')
-    required.add_argument('--input', type=argparse.FileType('r'),
-                          help='Input blurb file')
+    required.add_argument('--input', help='Input blurb file')
     required.add_argument('--output', help='Output blurb file')
     required.add_argument('--output-dir', help='Output unpacked blurb directory')
 
@@ -445,6 +456,7 @@ def parse_args():                         # pylint: disable=I0011,R0915
     _add_invertable(layout_flags, 'even-only', 'Only populate even-numbered pages')
     _add_invertable(layout_flags, 'overfill', 'Overfill pages')
     _add_invertable(layout_flags, 'add-pages', 'Add pages to existing book if necessary')
+    _add_invertable(layout_flags, 'single', 'Scale all images to fit on single page')
 
     sort_options = parser.add_argument_group('Sorting options')
     sort_options.add_argument('--random', action='store_true',
@@ -461,7 +473,7 @@ def parse_args():                         # pylint: disable=I0011,R0915
                                  help='Names/order of sections to include')
     section_options.add_argument("--section-field", metavar='<exif-tag>',
                                  help='Exif tag used for sections')
-    section_options.add_argument("--section-start", choices=['any', 'even', 'odd'],
+    section_options.add_argument("--section-start", choices=['any', 'even', 'odd', 'full'],
                                  default='any', help='Where to start new sections')
     section_options.add_argument("--section-blank-start", type=int,
                                  help='Number of blank pages to leave at start of section')
@@ -488,13 +500,14 @@ def parse_args():                         # pylint: disable=I0011,R0915
                               help='Maximum page number')
 
     positional_options = parser.add_argument_group('Positional arguments')
-    positional_options.add_argument('image_list', metavar='<image-file>', nargs='+',
-                                    help='Image to add to blur book')
+    positional_options.add_argument('image_list', metavar='<image-file>', nargs='*',
+                                    help='Image(s) to add to blurb book')
 
     if os.path.exists('./flowblurb.json') and '--no-default-config' not in sys.argv:
         args = parser.parse_args(['--config', './flowblurb.json']+sys.argv[1:])
     else:
         args = parser.parse_args()
+
     if args.double_only:
         args.double = True
     if args.output and os.path.exists(args.output) and not args.force:
@@ -728,29 +741,62 @@ def add_title_page(doc, args, pageno):
                  'style="font-size:%dpx;color:#000000;">%s</span></p>' % \
                  (args.section_title_font, args.section_title_fontsize, title)
 
-def populate_section(doc, args, pagenos, images):
-    """ Populate all images for a single section. """
-    images = sort_images(images, args)
+def make_builder(args, images):
+    """ Return a PageBuilder object appropriate for given args."""
     if args.smart:
-        builder = SmartPageBuilder(args, images)
+        return SmartPageBuilder(args, images)
     else:
         if args.reverse:
             images = images[::-1]
-        builder = PageBuilder(args, images)  # pylint: disable=I0011,R0204
-    if args.section_start == 'even':
+        return PageBuilder(args, images)
+
+def populate_pages(args, images, pagenos):
+    """ Return a page for each page number provided."""
+    return make_builder(args, images).get_pages(pagenos)
+
+def adjust_height(args, scale):
+    """ Adjusts the image height in the args. """
+    args.image_height *= scale
+
+def populate_single_page(args, images, pagenos):
+    """ Return a generator that scales all supplied images to fit on one page."""
+    local_args = argparse.Namespace(**vars(args))
+    builder = make_builder(local_args, images)
+    page_count = builder.get_page_count(pagenos)
+    if page_count > 1:
+        while page_count > 1:
+            adjust_height(local_args, 0.99)
+            builder = make_builder(local_args, images)
+            page_count = builder.get_page_count(pagenos)
+        return populate_pages(local_args, images, pagenos)
+    elif page_count:
+        while page_count == 1:
+            adjust_height(local_args, 1.01)
+            builder = make_builder(local_args, images)
+            page_count = builder.get_page_count(pagenos)
+        adjust_height(local_args, 1.0/1.01)
+    return populate_pages(local_args, images, pagenos)
+
+def populate_section(doc, args, pagenos, images):
+    """ Populate all images for a single section. """
+    images = sort_images(images, args)
+    if args.section_start == 'even' or args.section_start == 'full':
         while pagenos and (pagenos[0] % 2 == 1):
             pagenos.pop(0)
-    elif args.section_start == 'odd':
+    if args.section_start == 'odd' or args.section_start == 'full':
         while pagenos and (pagenos[0] % 2 == 0):
             pagenos.pop(0)
     if args.section_add_title:
         add_title_page(doc, args, pagenos.pop(0))
     if args.section_blank_start:
         del pagenos[0:args.section_blank_start]
-    populated = builder.get_pages(pagenos)
+    if args.single:
+        populated = populate_single_page(args, images, pagenos)
+    else:
+        populated = populate_pages(args, images, pagenos)
+    update_blurb(doc, populated)
     if args.section_blank_end:
         del pagenos[0:args.section_blank_end]
-    update_blurb(doc, populated)
 
 def populate_sections(doc, args, pagenos, images):
     """ Populate all images for multiple sections. """
@@ -758,16 +804,15 @@ def populate_sections(doc, args, pagenos, images):
     if not args.sections:
         args.sections = sorted(sections_map.keys())
     for section in args.sections:
-        if section in sections_map:
-            section_args = argparse.Namespace(**vars(args))
-            setattr(section_args, 'section_title', section)
-            if os.path.isfile(section+'.json'):
-                with open(section+'.json') as json_data:
-                    new_args = json.load(json_data)
-                    for key, value in new_args.iteritems():
-                        key = key.replace('-', '_')
-                        setattr(section_args, key, value)
-            populate_section(doc, section_args, pagenos, sections_map[section])
+        section_args = argparse.Namespace(**vars(args))
+        setattr(section_args, 'section_title', section)
+        if os.path.isfile(section+'.json'):
+            with open(section+'.json') as json_data:
+                new_args = json.load(json_data)
+                for key, value in new_args.iteritems():
+                    key = key.replace('-', '_')
+                    setattr(section_args, key, value)
+        populate_section(doc, section_args, pagenos, sections_map.get(section, []))
 
 def main():
     """ Main code. """
@@ -781,7 +826,7 @@ def main():
         args.page_height = float(doc.getroot().get('height'))
     if args.left == -1:
         args.left = 42 if args.mirror else 28
-    used_images = {i.get('src').split('.')[0]:i for i in doc.findall(".//image")}
+    used_images = {i.get('src').split('.')[0]:i for i in doc.findall("./section//image")}
 
     media = load_media(args.output_dir, args.image_list)
     if not args.import_only:
