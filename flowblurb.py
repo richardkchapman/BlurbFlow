@@ -1,6 +1,7 @@
 #!/usr/bin/env python
 """ Populate a blurb book automatically using a 500px-like algorithm"""
 import argparse
+import glob
 import os
 import sys
 import math
@@ -16,9 +17,10 @@ from PIL import Image
 import lxml.etree as ET
 import extractBlurbFiles
 import mergeBlurbFiles
+import slideshow
 
 ImageInfo = collections.namedtuple('ImageInfo', ('name', 'src', 'width', 'height', 'modified'))
-ScaledImageInfo = collections.namedtuple('ScaledImageInfo', ('image', 'scale'))
+ScaledImageInfo = collections.namedtuple('ScaledImageInfo', ('image', 'scale', 'x', 'y'))
 
 class PageBuilder(object):
     """ Populate images onto pages. """
@@ -76,18 +78,7 @@ class PageBuilder(object):
             elif self.args.mirror and pageno%2 == 1:
                 x += (page_width - row_width)
             for img in row:
-                page.append(
-                    {
-                        'x': str(x),
-                        'y': str(y),
-                        'width': str(img.image.width*img.scale),
-                        'height': str(img.image.height*img.scale),
-                        'type': 'image',
-                        'transform': '1 0 0 1',
-                        'id': str(uuid.uuid4()),
-                        'name': img.image.name,
-                        'scale': str(img.scale)
-                    })
+                page.append(ScaledImageInfo(image=img.image, scale=img.scale, x=x, y=y))
                 x += img.image.width*img.scale + xspace
             y += row[0].image.height*row[0].scale + yspace
         return page
@@ -124,7 +115,7 @@ class PageBuilder(object):
                     # into the desired row width, but ignoring the whitespace which is not scaled
                     if self.args.scale:
                         scale = self._row_scale(row_width, page_width, row)
-                        return [ScaledImageInfo(image=i.image, scale=i.scale*scale)
+                        return [ScaledImageInfo(image=i.image, scale=i.scale*scale, x=0, y=0)
                                 for i in row]
                     else:
                         return row
@@ -132,14 +123,14 @@ class PageBuilder(object):
                     # Single image is too wide for row - scale h instead
                     scaledw = page_width
                     scaledh = height * scaledw/width
-            row.append(ScaledImageInfo(image, scaledh/height))
+            row.append(ScaledImageInfo(image=image, scale=float(scaledh)/height, x=0, y=0))
             row_width += scaledw + self.args.xspace
         # leftover images are left unscaled unless the scale required to fill the row is small
         if row:
             scale = self._row_scale(row_width, page_width, row)
             if scale > 1.2:
                 scale = 1.0
-            return [ScaledImageInfo(image=i.image, scale=i.scale*scale)
+            return [ScaledImageInfo(image=i.image, scale=i.scale*scale, x=0, y=0)
                     for i in row]
         else:
             return None
@@ -492,6 +483,8 @@ def parse_args():                         # pylint: disable=I0011,R0915
     misc_options.add_argument('--help', action='help', help='show this help message and exit')
     misc_options.add_argument('-f', '--force', dest='force', help='Force overwrite',
                               action='store_true')
+    misc_options.add_argument('--preview', help='Preview pages',
+                              action='store_true')
     misc_options.add_argument('--config', metavar='<jsonfile>', type=jsonfile, action=LoadFromJson,
                               help='Load options from specified file')
     misc_options.add_argument('--no-default-config', action='store_true',
@@ -529,16 +522,39 @@ def update_blurb(doc, populated):
             rhs = find_page(doc, pageno+1)
             rhs.getparent().remove(rhs)
         for img in layout:
-            container = ET.SubElement(page, 'container', img)
+            container = ET.SubElement(page, 'container', {
+                'x': str(img.x),
+                'y': str(img.y),
+                'width': str(img.image.width*img.scale),
+                'height': str(img.image.height*img.scale),
+                'type': 'image',
+                'transform': '1 0 0 1',
+                'id': str(uuid.uuid4()),
+            })
             ET.SubElement(container, 'image',
-                          {'scale':img.get('scale'),
+                          {'scale':img.scale,
                            'x':'0', 'y':'0',
                            'autolayout':'fill',
                            'flip':'none',
-                           'src':img.get('name')+'.jpg'
+                           'src':img.image.name+'.jpg'
                           })
-            del container.attrib['name']
-            del container.attrib['scale']
+
+def preview(args, populated, previews):
+    """ Output jpegs for each tiled page. """
+    for layout, pageno, double in populated:
+        if double:
+            canvas = Image.new('RGB', (int(args.page_width*2), int(args.page_height)), "white")
+        else:
+            canvas = Image.new('RGB', (int(args.page_width), int(args.page_height)), "white")
+        for img in layout:
+            width = img.image.width*img.scale
+            height = img.image.height*img.scale
+            src = args.output_dir + '/images/' + img.image.name+'.jpg'
+            in_image = Image.open(src)
+            resized = in_image.resize((int(width), int(height)))
+            canvas.paste(resized, (int(img.x), int(img.y)))
+        canvas.save('page%d.jpg'%pageno)
+        previews.append('page%d.jpg'%pageno)
 
 def create_backup(extracted):
     """ Create a backup of the bbf2.xml in old_bbfs/bbf2_000000000<n>.xml """
@@ -586,10 +602,7 @@ def populate_media(project_dir, media, images):
             if not os.path.exists("%s/images" % (project_dir)):
                 os.makedirs("%s/images" % (project_dir))
             link_or_copy(image_name, "%s/images/%s.%s" % (project_dir, guid, ext))
-            img.thumbnail((640, 640), Image.ANTIALIAS)
-            if not os.path.exists("%s/thumbnails" % (project_dir)):
-                os.makedirs("%s/thumbnails" % (project_dir))
-            img.save("%s/thumbnails/%s.jpg" % (project_dir, guid))
+            # creation of the thumbnails deferred until merge time
             changed = True
     return changed
 
@@ -777,7 +790,7 @@ def populate_single_page(args, images, pagenos):
         adjust_height(local_args, 1.0/1.01)
     return populate_pages(local_args, images, pagenos)
 
-def populate_section(doc, args, pagenos, images):
+def populate_section(doc, args, pagenos, images, previews):
     """ Populate all images for a single section. """
     images = sort_images(images, args)
     if args.section_start == 'even' or args.section_start == 'full':
@@ -794,11 +807,14 @@ def populate_section(doc, args, pagenos, images):
         populated = populate_single_page(args, images, pagenos)
     else:
         populated = populate_pages(args, images, pagenos)
-    update_blurb(doc, populated)
+    if args.preview:
+        preview(args, populated, previews)
+    else:
+        update_blurb(doc, populated)
     if args.section_blank_end:
         del pagenos[0:args.section_blank_end]
 
-def populate_sections(doc, args, pagenos, images):
+def populate_sections(doc, args, pagenos, images, previews):
     """ Populate all images for multiple sections. """
     sections_map = find_sections(args, images)
     if not args.sections:
@@ -812,7 +828,7 @@ def populate_sections(doc, args, pagenos, images):
                 for key, value in new_args.iteritems():
                     key = key.replace('-', '_')
                     setattr(section_args, key, value)
-        populate_section(doc, section_args, pagenos, sections_map.get(section, []))
+        populate_section(doc, section_args, pagenos, sections_map.get(section, []), previews)
 
 def main():
     """ Main code. """
@@ -827,8 +843,12 @@ def main():
     if args.left == -1:
         args.left = 42 if args.mirror else 28
     used_images = {i.get('src').split('.')[0]:i for i in doc.findall("./section//image")}
-
+    globbed = []
+    for image in args.image_list:
+        globbed = globbed + glob.glob(image)
+    args.image_list = globbed
     media = load_media(args.output_dir, args.image_list)
+    previews = []
     if not args.import_only:
         unused = [ImageInfo(name=entry.get('guid'),
                             src=entry.get('src'),
@@ -841,12 +861,14 @@ def main():
         if args.add_pages or not args.input:
             pagenos.extend(range(last_page(doc)+1, args.max_page))
         if args.section_field:
-            populate_sections(doc, args, pagenos, unused)
+            populate_sections(doc, args, pagenos, unused, previews)
         else:
-            populate_section(doc, args, pagenos, unused)
+            populate_section(doc, args, pagenos, unused, previews)
     doc.write(args.output_dir+'/bbf2.xml', pretty_print=True)
-    if args.output:
-        mergeBlurbFiles.merge(args.output_dir, args.output)
+    if args.preview:
+        slideshow.run_slideshow(previews)
+    elif args.output:
+        mergeBlurbFiles.merge(args.output_dir, args.output, create_thumbs=False)
     if istemp:
         shutil.rmtree(args.output_dir)
 
