@@ -64,6 +64,9 @@ class PageBuilder(object):
     def _generate_page(self, page_width, rows, pageno, first, last):  # pylint: disable=I0011,R0913,W0613
         page = []
         y, yspace = self._calc_y_position(rows, first)
+        if self.args.overfill and self._page_height(rows)>self.page_height:
+            self._unget_row(rows[-1])
+            self._unget_row(rows[-2])
         for row in rows:
             if self.args.mirror and pageno%2 == 0:
                 x = self.args.right
@@ -155,12 +158,10 @@ class PageBuilder(object):
                 break
             row_height = next_row[0].image.height * next_row[0].scale
             if row_height + height > self.page_height:
-                self._unget_row(next_row)
                 if self.args.overfill:
-                    # An alternative approach to overfill is to treat it as a
-                    # padding mathod in generate
-                    self._unget_row(page_rows[-1])
-                    page_rows.append(next_row)
+                    page_rows.append(next_row) # we want it on the bottom
+                else:
+                    self._unget_row(next_row)
                 break
             if page_rows or not self.args.overfill or first:
                 height += row_height + self.args.yspace
@@ -233,18 +234,25 @@ class SmartPageBuilder(PageBuilder):
         if not self.args.scale:
             # sort the rows to a more pleasing order - wide in the middle,
             # narrowest at the bottom
-            rows.sort(key=self._row_width, reverse=True)
-            if last:
-                last_row = rows.pop()
+            carried_rows = []
+            if self.args.overfill and not first:
+                # The first two rows should be the last two rows of the previous page
+                carried_rows.append(rows.pop(0))
+                carried_rows.append(rows.pop(0))
             new_rows = []
+            rows.sort(key=self._row_width, reverse=True)
+            if last and len(rows):
+                last_row = rows.pop()
+            else:
+                last_row = None
             for row in rows:
                 if len(new_rows) % 2:
                     new_rows.append(row)
                 else:
                     new_rows.insert(0, row)
-            if last:
+            if last_row:
                 new_rows.append(last_row)
-            rows = new_rows
+            rows = carried_rows + new_rows
         return super(SmartPageBuilder, self)._generate_page(page_width, rows, pageno, first, last)
 
     def _preferred_size(self, width, height, image):
