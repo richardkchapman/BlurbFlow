@@ -12,8 +12,11 @@ import tempfile
 import shutil
 import subprocess
 import random
+import threading
 from datetime import datetime
 from PIL import Image
+from PIL import ImageFont
+from PIL import ImageDraw
 import lxml.etree as ET
 import extractBlurbFiles
 import mergeBlurbFiles
@@ -64,7 +67,7 @@ class PageBuilder(object):
     def _generate_page(self, page_width, rows, pageno, first, last):  # pylint: disable=I0011,R0913,W0613
         page = []
         y, yspace = self._calc_y_position(rows, first)
-        if self.args.overfill and self._page_height(rows)>self.page_height:
+        if self.args.overfill and self._page_height(rows) > self.page_height:
             self._unget_row(rows[-1])
             self._unget_row(rows[-2])
         for row in rows:
@@ -92,10 +95,9 @@ class PageBuilder(object):
         return (scaledw, scaledh)
 
     def _row_scale(self, row_width, page_width, row):
-        whitespace = (len(row)-1) * self.args.xspace
+        whitespace = len(row) * self.args.xspace
         target_width = page_width - whitespace
-        row_width -= whitespace
-        return target_width/row_width
+        return target_width/(row_width-whitespace)
 
     def _get_row(self, page_width):
         row_width = 0
@@ -110,15 +112,14 @@ class PageBuilder(object):
             width = image.width
             height = image.height
             scaledw, scaledh = self._preferred_size(width, height, first_image)
-            if row_width + scaledw > page_width:
+            if row_width + scaledw > page_width and len(row) > 2:
                 if row:
                     self.images.append(image)
-                    row_width -= self.args.xspace      # we always added a trailing whitespace
                     # Required scale is what it takes to turn the current row width
                     # into the desired row width, but ignoring the whitespace which is not scaled
                     if self.args.scale:
-                        scale = self._row_scale(row_width, page_width, row)
-                        return [ScaledImageInfo(image=i.image, scale=i.scale*scale, x=0, y=0)
+                        tscale = self._row_scale(row_width, page_width, row)
+                        return [ScaledImageInfo(image=i.image, scale=i.scale*tscale, x=0, y=0)
                                 for i in row]
                     else:
                         return row
@@ -131,7 +132,7 @@ class PageBuilder(object):
         # leftover images are left unscaled unless the scale required to fill the row is small
         if row:
             scale = self._row_scale(row_width, page_width, row)
-            if scale > 1.2:
+            if scale > 1.2 and len(row) < 3:
                 scale = 1.0
             return [ScaledImageInfo(image=i.image, scale=i.scale*scale, x=0, y=0)
                     for i in row]
@@ -209,6 +210,19 @@ class PageBuilder(object):
         pages = self.get_pages(pagenos[:])
         return sum(1 for _ in pages)
 
+def fuzzy_sort_coarse(image):
+    """ A very fuzzy sort by aspect ratio - portrait then square then landscape"""
+    if image.width > image.height:
+        return 1
+    elif image.width < image.height:
+        return -1
+    else:
+        return 0
+
+def fuzzy_sort_fine(image):
+    """ A slightly less fuzzy sort by aspect ratio"""
+    return round(float(image.width)/image.height)
+
 class SmartPageBuilder(PageBuilder):
     """ Populate images onto pages, trying to do so intelligently.
         Smart algorithm mk 2:
@@ -222,7 +236,12 @@ class SmartPageBuilder(PageBuilder):
             allocate best fit or best pair
     """
     def __init__(self, args, images):
-        images = sorted(images, key=lambda image: float(image.width)/image.height, reverse=True)
+        if self.args.fuzzy == 'coarse':
+            images = sorted(images, key=lambda image: fuzzy_sort_coarse(image), reverse=True) # pylint: disable=I0011,W0108
+        elif self.args.fuzzy == 'fine':
+            images = sorted(images, key=lambda image: fuzzy_sort_fine(image), reverse=True) # pylint: disable=I0011,W0108
+        else:
+            images = sorted(images, key=lambda image: float(image.width)/image.height, reverse=True)
         super(SmartPageBuilder, self).__init__(args, images)
         self.all_rows = None
         self.mode = 0
@@ -458,10 +477,12 @@ def parse_args():                         # pylint: disable=I0011,R0915
     _add_invertable(layout_flags, 'single', 'Scale all images to fit on single page')
 
     sort_options = parser.add_argument_group('Sorting options')
-    sort_options.add_argument('--random', action='store_true',
+    sort_options.add_argument('--random',
                               help='Shuffle images')
     sort_options.add_argument('--sort',
                               help='Sort order')
+    sort_options.add_argument('--fuzzy', choices=['coarse', 'fine', 'off'],
+                              default='off', help='Use fuzzy sorting in smart flow mode')
     sort_options.add_argument('--reverse', action='store_true',
                               help='Reverse image sort order')
     sort_options.add_argument('--exiftool', default='exiftool',
@@ -540,7 +561,7 @@ def update_blurb(doc, populated):
                 'id': str(uuid.uuid4()),
             })
             ET.SubElement(container, 'image',
-                          {'scale':img.scale,
+                          {'scale':str(img.scale),
                            'x':'0', 'y':'0',
                            'autolayout':'fill',
                            'flip':'none',
@@ -549,20 +570,34 @@ def update_blurb(doc, populated):
 
 def preview(args, populated, previews):
     """ Output jpegs for each tiled page. """
+    threads = []
     for layout, pageno, double in populated:
-        if double:
-            canvas = Image.new('RGB', (int(args.page_width*2), int(args.page_height)), "white")
-        else:
-            canvas = Image.new('RGB', (int(args.page_width), int(args.page_height)), "white")
-        for img in layout:
-            width = img.image.width*img.scale
-            height = img.image.height*img.scale
-            src = args.output_dir + '/images/' + img.image.name+'.jpg'
-            in_image = Image.open(src)
-            resized = in_image.resize((int(width), int(height)))
-            canvas.paste(resized, (int(img.x), int(img.y)))
-        canvas.save('page%d.jpg'%pageno)
-        previews.append('page%d.jpg'%pageno)
+        thread = threading.Thread(target=preview_one, args=(layout, pageno, double, args, previews))
+        thread.start()
+        threads.append(thread)
+    for thread in threads:
+        thread.join()
+    previews.sort()
+
+def preview_one(layout, pageno, double, args, previews):
+    """ Output jpegs for a single tiled page. """
+    if double:
+        canvas = Image.new('RGB', (int(args.page_width*2), int(args.page_height)), "white")
+    else:
+        canvas = Image.new('RGB', (int(args.page_width), int(args.page_height)), "white")
+    for img in layout:
+        width = img.image.width*img.scale
+        height = img.image.height*img.scale
+        src = args.output_dir + '/images/' + img.image.name+'.jpg'
+        in_image = Image.open(src)
+        resized = in_image.resize((int(width), int(height)))
+        canvas.paste(resized, (int(img.x), int(img.y)))
+        font = ImageFont.truetype("Arial Bold.ttf", 16)
+        draw = ImageDraw.Draw(canvas)
+        name = os.path.splitext(os.path.basename(img.image.src))[0]
+        draw.text((int(img.x), int(img.y)), name, (57, 255, 20), font=font)
+    canvas.save('page%03d.jpg'%pageno)
+    previews.append('page%03d.jpg'%pageno)
 
 def create_backup(extracted):
     """ Create a backup of the bbf2.xml in old_bbfs/bbf2_000000000<n>.xml """
@@ -630,6 +665,7 @@ def load_media(project_dir, image_list):
 def sort_images(images, args):
     """ Sort images according to requested order. """
     if args.random:
+        random.seed(args.random)
         random.shuffle(images)
     if args.sort:
         if args.sort == 'name':
