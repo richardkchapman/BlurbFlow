@@ -236,9 +236,9 @@ class SmartPageBuilder(PageBuilder):
             allocate best fit or best pair
     """
     def __init__(self, args, images):
-        if self.args.fuzzy == 'coarse':
+        if args.fuzzy == 'coarse':
             images = sorted(images, key=lambda image: fuzzy_sort_coarse(image), reverse=True) # pylint: disable=I0011,W0108
-        elif self.args.fuzzy == 'fine':
+        elif args.fuzzy == 'fine':
             images = sorted(images, key=lambda image: fuzzy_sort_fine(image), reverse=True) # pylint: disable=I0011,W0108
         else:
             images = sorted(images, key=lambda image: float(image.width)/image.height, reverse=True)
@@ -514,12 +514,20 @@ def parse_args():                         # pylint: disable=I0011,R0915
                               action='store_true')
     misc_options.add_argument('--preview', help='Preview pages',
                               action='store_true')
+    misc_options.add_argument('--check-sizes', help='Check image sizes',
+                              action='store_true')
     misc_options.add_argument('--config', metavar='<jsonfile>', type=jsonfile, action=LoadFromJson,
                               help='Load options from specified file')
     misc_options.add_argument('--no-default-config', action='store_true',
                               help='Do not try to load default configuration')
     misc_options.add_argument('--max-page', type=int, default=240,
                               help='Maximum page number')
+    misc_options.add_argument('--min-ppi', type=int, default=300,
+                              help='Minimum PPI')
+    misc_options.add_argument('--max-ppi', type=int, default=500,
+                              help='Maximum PPI')
+    misc_options.add_argument('--normal-ppi', type=int, default=300,
+                              help='Target PPI')
 
     positional_options = parser.add_argument_group('Positional arguments')
     positional_options.add_argument('image_list', metavar='<image-file>', nargs='*',
@@ -594,10 +602,33 @@ def preview_one(layout, pageno, double, args, previews):
         canvas.paste(resized, (int(img.x), int(img.y)))
         font = ImageFont.truetype("Arial Bold.ttf", 16)
         draw = ImageDraw.Draw(canvas)
+        ppi = 72.0/img.scale
         name = os.path.splitext(os.path.basename(img.image.src))[0]
-        draw.text((int(img.x), int(img.y)), name, (57, 255, 20), font=font)
+        text = '%s\n%d ppi ' % (name, ppi)
+        draw.text((int(img.x), int(img.y)), text, (57, 255, 20), font=font)
     canvas.save('page%03d.jpg'%pageno)
     previews.append('page%03d.jpg'%pageno)
+
+def recommend_size(args, img):
+    """ Recommend size (in pixels) for populated image to reach 300 dpi"""
+    current_ppi = 72.0/img.scale
+    target_ppi = args.normal_ppi
+    scale = target_ppi/current_ppi
+    return (int(img.image.width*scale), int(img.image.height*scale))
+
+def check_sizes(args, populated):
+    """ Check all image resolutions are reasonable. """
+    for layout, _, _ in populated:
+        for img in layout:
+            ppi = 72.0/img.scale
+            name = os.path.splitext(os.path.basename(img.image.src))[0]
+            width, height = recommend_size(args, img)
+            if ppi < args.min_ppi:
+                print 'Resolution too low for %s (%d ppi) - ideal size (%d,%d)' % \
+                       (name, ppi, width, height)
+            elif ppi > args.max_ppi:
+                print 'Resolution too high for %s (%d ppi) - ideal size (%d,%d)' % \
+                       (name, ppi, width, height)
 
 def create_backup(extracted):
     """ Create a backup of the bbf2.xml in old_bbfs/bbf2_000000000<n>.xml """
@@ -848,9 +879,11 @@ def populate_section(doc, args, pagenos, images, previews):
     if args.section_blank_start:
         del pagenos[0:args.section_blank_start]
     if args.single:
-        populated = populate_single_page(args, images, pagenos)
+        populated = list(populate_single_page(args, images, pagenos))
     else:
-        populated = populate_pages(args, images, pagenos)
+        populated = list(populate_pages(args, images, pagenos))
+    if args.check_sizes:
+        check_sizes(args, populated)
     if args.preview:
         preview(args, populated, previews)
     else:
