@@ -514,6 +514,8 @@ def parse_args():                         # pylint: disable=I0011,R0915
                               action='store_true')
     misc_options.add_argument('--preview', help='Preview pages',
                               action='store_true')
+    misc_options.add_argument('--preview-info', help='Output image information in preview',
+                              action='store_true')
     misc_options.add_argument('--check-sizes', help='Check image sizes',
                               action='store_true')
     misc_options.add_argument('--config', metavar='<jsonfile>', type=jsonfile, action=LoadFromJson,
@@ -528,6 +530,8 @@ def parse_args():                         # pylint: disable=I0011,R0915
                               help='Maximum PPI')
     misc_options.add_argument('--normal-ppi', type=int, default=300,
                               help='Target PPI')
+    misc_options.add_argument('--preview-ppi', type=int, default=150,
+                              help='Preview PPI')
 
     positional_options = parser.add_argument_group('Positional arguments')
     positional_options.add_argument('image_list', metavar='<image-file>', nargs='*',
@@ -589,23 +593,34 @@ def preview(args, populated, previews):
 
 def preview_one(layout, pageno, double, args, previews):
     """ Output jpegs for a single tiled page. """
+    preview_scale = float(args.preview_ppi)/72
     if double:
-        canvas = Image.new('RGB', (int(args.page_width*2), int(args.page_height)), "white")
+        page_size = (int(args.page_width*preview_scale*2), int(args.page_height*preview_scale))
     else:
-        canvas = Image.new('RGB', (int(args.page_width), int(args.page_height)), "white")
+        page_size = (int(args.page_width*preview_scale), int(args.page_height*preview_scale))
+    canvas = Image.new('RGB', page_size, (240, 240, 240))
     for img in layout:
-        width = img.image.width*img.scale
-        height = img.image.height*img.scale
+        x = int(img.x*preview_scale)
+        y = int(img.y*preview_scale)
+        width = int(img.image.width*img.scale*preview_scale)
+        height = int(img.image.height*img.scale*preview_scale)
         src = args.output_dir + '/images/' + img.image.name+'.jpg'
         in_image = Image.open(src)
-        resized = in_image.resize((int(width), int(height)))
-        canvas.paste(resized, (int(img.x), int(img.y)))
-        font = ImageFont.truetype("Arial Bold.ttf", 16)
-        draw = ImageDraw.Draw(canvas)
-        ppi = 72.0/img.scale
-        name = os.path.splitext(os.path.basename(img.image.src))[0]
-        text = '%s\n%d ppi ' % (name, ppi)
-        draw.text((int(img.x), int(img.y)), text, (57, 255, 20), font=font)
+        resized = in_image.resize((width, height))
+        canvas.paste(resized, (x, y))
+        if args.preview_info:
+            font = ImageFont.truetype("Arial Bold.ttf", int(16*preview_scale))
+            draw = ImageDraw.Draw(canvas)
+            ppi = 72.0/img.scale
+            name = os.path.splitext(os.path.basename(img.image.src))[0]
+            text = '%s\n%d ppi ' % (name, ppi)
+            draw.text((x, y), text, (57, 255, 20), font=font)
+            if ppi < args.min_ppi:
+                draw.line((x, y, x+width, y+height), fill='red', width=5)
+                draw.line((x, y+height, x+width, y), fill='red', width=5)
+            elif ppi > args.max_ppi:
+                draw.line((x, y, x+width, y+height), fill='green', width=5)
+                draw.line((x, y+height, x+width, y), fill='green', width=5)
     canvas.save('page%03d.jpg'%pageno)
     previews.append('page%03d.jpg'%pageno)
 
@@ -943,7 +958,9 @@ def main():
             populate_section(doc, args, pagenos, unused, previews)
     doc.write(args.output_dir+'/bbf2.xml', pretty_print=True)
     if args.preview:
-        slideshow.run_slideshow(previews)
+        img_scale = float(args.preview_ppi)/72
+        size = (int(args.page_width*img_scale), int(args.page_height*img_scale))
+        slideshow.run_slideshow(previews, size)
     elif args.output:
         mergeBlurbFiles.merge(args.output_dir, args.output, create_thumbs=False)
     if istemp:

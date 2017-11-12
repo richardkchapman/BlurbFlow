@@ -83,9 +83,11 @@ class Slideshow(object):
             self._show_image_on_next_tick()
 
 
-def run_slideshow(image_filenames):
+def run_slideshow(image_filenames, size):
     root = tk.Tk()
-    width, height, xoffset, yoffset = 400, 300, 0, 0
+    root.wm_title("Slideshow                      ") # Helps ensure title is not ...
+    width, height = size
+    xoffset, yoffset = 0, 0
     root.geometry("%dx%d%+d%+d" % (width, height, xoffset, yoffset))
 
     try:  # start slideshow
@@ -109,4 +111,4 @@ def run_slideshow(image_filenames):
     root.mainloop()
 
 if __name__ == '__main__':
-    run_slideshow(sys.argv[1:])
+    run_slideshow(sys.argv[1:], (400, 300))
