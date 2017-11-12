@@ -31,6 +31,7 @@ class PageBuilder(object):
         self.args = args
         self.images = images[::-1] # reverses the list, not in-place
         self.page_height = args.page_height-(args.top+args.bottom)
+        self.incomplete = True
 
     def _row_width(self, row):
         num_deltas = len(row)-1
@@ -132,8 +133,11 @@ class PageBuilder(object):
         # leftover images are left unscaled unless the scale required to fill the row is small
         if row:
             scale = self._row_scale(row_width, page_width, row)
-            if scale > 1.2 and len(row) < 3:
+            if scale > 1.2: # and len(row) < 3:
                 scale = 1.0
+                self.incomplete = True
+            else:
+                self.incomplete = False
             return [ScaledImageInfo(image=i.image, scale=i.scale*scale, x=0, y=0)
                     for i in row]
         else:
@@ -205,10 +209,11 @@ class PageBuilder(object):
                         break
 
     def get_page_count(self, pagenos):
-        """ Return nuber of pages that this builder would create. Note that this is
-            destructive in that the builder is not usable afterwards. """
+        """ Return number of pages that this builder would create, and an indication
+            of whether last row is complete.
+            Note that this is destructive in that the builder is not usable afterwards. """
         pages = self.get_pages(pagenos[:])
-        return sum(1 for _ in pages)
+        return (sum(1 for _ in pages), self.incomplete)
 
 def fuzzy_sort_coarse(image):
     """ A very fuzzy sort by aspect ratio - portrait then square then landscape"""
@@ -475,10 +480,12 @@ def parse_args():                         # pylint: disable=I0011,R0915
     _add_invertable(layout_flags, 'overfill', 'Overfill pages')
     _add_invertable(layout_flags, 'add-pages', 'Add pages to existing book if necessary')
     _add_invertable(layout_flags, 'single', 'Scale all images to fit on single page')
+    layout_flags.add_argument('--scale-pages', type=int, default=0,
+                              help='Scale all images to fit on N pages')
 
     sort_options = parser.add_argument_group('Sorting options')
     sort_options.add_argument('--random',
-                              help='Shuffle images')
+                              help='Shuffle images using seed')
     sort_options.add_argument('--sort',
                               help='Sort order')
     sort_options.add_argument('--fuzzy', choices=['coarse', 'fine', 'off'],
@@ -857,28 +864,51 @@ def populate_pages(args, images, pagenos):
     """ Return a page for each page number provided."""
     return make_builder(args, images).get_pages(pagenos)
 
-def adjust_height(args, scale):
-    """ Adjusts the image height in the args. """
-    args.image_height *= scale
+def populate_single_page(args, count, images, pagenos):
+    """ Return a generator that scales all supplied images to fit on fixed number of pages."""
+    def _try_it():
+        builder = make_builder(args, images)
+        page_count, incomplete = builder.get_page_count(pagenos)
+        return (page_count, incomplete)
 
-def populate_single_page(args, images, pagenos):
-    """ Return a generator that scales all supplied images to fit on one page."""
-    local_args = argparse.Namespace(**vars(args))
-    builder = make_builder(local_args, images)
-    page_count = builder.get_page_count(pagenos)
-    if page_count > 1:
-        while page_count > 1:
-            adjust_height(local_args, 0.99)
-            builder = make_builder(local_args, images)
-            page_count = builder.get_page_count(pagenos)
-        return populate_pages(local_args, images, pagenos)
-    elif page_count:
-        while page_count == 1:
-            adjust_height(local_args, 1.01)
-            builder = make_builder(local_args, images)
-            page_count = builder.get_page_count(pagenos)
-        adjust_height(local_args, 1.0/1.01)
-    return populate_pages(local_args, images, pagenos)
+    while True:
+        page_count, incomplete = _try_it()
+        if not page_count:
+            break
+        if page_count > count:
+            while page_count > count:
+                args.image_height *= 0.99
+                page_count, incomplete = _try_it()
+        else:
+            while page_count < count:
+                args.image_height *= 1.01
+                page_count, incomplete = _try_it()
+            args.image_height /= 1.01
+        best_height = args.image_height
+        perfect_height = 0
+        while page_count <= count:
+            args.image_height += 1
+            page_count, incomplete = _try_it()
+            if page_count <= count:
+                best_height = args.image_height
+            if page_count == count and not incomplete:
+                perfect_height = args.image_height
+        if perfect_height:
+            args.image_height = perfect_height
+            incomplete = False
+        else:
+            args.image_height = best_height
+        if not incomplete:
+            break
+        if args.smart and args.random:
+            args.random = args.random[:-1]
+        else:
+            break
+    print 'Optimized image height is %d' % (args.image_height)
+    if args.random:
+        print 'Optimized seed %s' % (args.random)
+    print 'Optimization incomplete: %d' % (incomplete)
+    return populate_pages(args, images, pagenos)
 
 def populate_section(doc, args, pagenos, images, previews):
     """ Populate all images for a single section. """
@@ -893,8 +923,9 @@ def populate_section(doc, args, pagenos, images, previews):
         add_title_page(doc, args, pagenos.pop(0))
     if args.section_blank_start:
         del pagenos[0:args.section_blank_start]
-    if args.single:
-        populated = list(populate_single_page(args, images, pagenos))
+    if args.scale_pages:
+        local_args = argparse.Namespace(**vars(args))
+        populated = list(populate_single_page(local_args, args.scale_pages, images, pagenos))
     else:
         populated = list(populate_pages(args, images, pagenos))
     if args.check_sizes:
@@ -934,6 +965,8 @@ def main():
         args.page_height = float(doc.getroot().get('height'))
     if args.left == -1:
         args.left = 42 if args.mirror else 28
+    if args.single and not args.scale_pages:
+        args.scale_pages = 1
     used_images = {i.get('src').split('.')[0]:i for i in doc.findall("./section//image")}
     globbed = []
     for image in args.image_list:
