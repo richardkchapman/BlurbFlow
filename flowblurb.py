@@ -1,4 +1,5 @@
 #!/usr/bin/env python
+from __future__ import print_function
 """ Populate a blurb book automatically using a 500px-like algorithm"""
 import argparse
 import glob
@@ -104,16 +105,28 @@ class PageBuilder(object):
         row_width = 0
         row = []
         first_image = None
+        last_aspect = 0
         while True:
             image = self.images.pop() if self.images else None
             if image is None:
                 break
-            if not first_image:
-                first_image = image
+            if self.args.verbose:
+                print ('Placing image %s %s ' % (image, ' '))
             width = image.width
             height = image.height
+            is_pano = width >= self.args.pano_threshold*height
+            aspect = float(image.width)/image.height
+            if not first_image:
+                first_image = image
+                last_aspect = aspect
             scaledw, scaledh = self._preferred_size(width, height, first_image)
-            if row_width + scaledw > page_width and len(row) > 2:
+            if self.args.verbose and not self.args.mix_aspect:
+                if (aspect/last_aspect < 0.66) and not (is_pano or row_width + scaledw > page_width):
+                    print ('Switching aspect ratio %s to %s ' % (first_image,image))
+            if is_pano or row_width + scaledw > page_width \
+                       or (aspect/last_aspect < 0.66 and not self.args.mix_aspect):
+                if self.args.verbose:
+                    print ('Row break')
                 if row:
                     self.images.append(image)
                     # Required scale is what it takes to turn the current row width
@@ -125,9 +138,12 @@ class PageBuilder(object):
                     else:
                         return row
                 else:
-                    # Single image is too wide for row - scale h instead
+                    # Single image is too wide for row or is 'pano' - scale to full width or height as appropriate
                     scaledw = page_width
                     scaledh = height * scaledw/width
+                    if (scaledh > self.page_height):
+                        scaledh = self.page_height
+                        scaledw = width * scaledh/height
             row.append(ScaledImageInfo(image=image, scale=float(scaledh)/height, x=0, y=0))
             row_width += scaledw + self.args.xspace
         # leftover images are left unscaled unless the scale required to fill the row is small
@@ -162,7 +178,7 @@ class PageBuilder(object):
                 last = True
                 break
             row_height = next_row[0].image.height * next_row[0].scale
-            if row_height + height > self.page_height:
+            if page_rows and row_height + height > self.page_height:
                 if self.args.overfill:
                     page_rows.append(next_row) # we want it on the bottom
                 else:
@@ -215,9 +231,11 @@ class PageBuilder(object):
         pages = self.get_pages(pagenos[:])
         return (sum(1 for _ in pages), self.incomplete)
 
-def fuzzy_sort_coarse(image):
-    """ A very fuzzy sort by aspect ratio - portrait then square then landscape"""
-    if image.width > image.height:
+def fuzzy_sort_coarse(image, pano_threshold):
+    """ A very fuzzy sort by aspect ratio - portrait then square then landscape then pano"""
+    if image.width > image.height*pano_threshold:
+        return 2
+    elif image.width > image.height:
         return 1
     elif image.width < image.height:
         return -1
@@ -242,7 +260,7 @@ class SmartPageBuilder(PageBuilder):
     """
     def __init__(self, args, images):
         if args.fuzzy == 'coarse':
-            images = sorted(images, key=lambda image: fuzzy_sort_coarse(image), reverse=True) # pylint: disable=I0011,W0108
+            images = sorted(images, key=lambda image: fuzzy_sort_coarse(image, args.pano_threshold), reverse=True) # pylint: disable=I0011,W0108
         elif args.fuzzy == 'fine':
             images = sorted(images, key=lambda image: fuzzy_sort_fine(image), reverse=True) # pylint: disable=I0011,W0108
         else:
@@ -265,7 +283,8 @@ class SmartPageBuilder(PageBuilder):
                 carried_rows.append(rows.pop(0))
             new_rows = []
             rows.sort(key=self._row_width, reverse=True)
-            if last and len(rows):
+            #Keep last row last if it's incomplete
+            if last and len(rows) and self._row_width(rows[-1]) < page_width*0.75:
                 last_row = rows.pop()
             else:
                 last_row = None
@@ -282,7 +301,10 @@ class SmartPageBuilder(PageBuilder):
     def _preferred_size(self, width, height, image):
         """ What width/height would make this image have area self.image_height^2"""
         aspect = float(image.width)/image.height
-        scaledh = self.args.image_height/math.sqrt(aspect)
+        if aspect >= 1:
+            scaledh = self.args.image_height/math.sqrt(aspect)
+        else:
+            scaledh = self.args.image_height
         scaledw = float(width) * scaledh/height
         return (scaledw, scaledh)
 
@@ -474,14 +496,20 @@ def parse_args():                         # pylint: disable=I0011,R0915
     _add_invertable(layout_flags, 'yspread', 'Spread rows vertically within pages')
     _add_invertable(layout_flags, 'scale', 'Scale images within rows to fill width')
     _add_invertable(layout_flags, 'double', 'Use double-page spreads where possible')
+    _add_invertable(layout_flags, 'double-pano', 'Use double-page spreads for pano images')
     _add_invertable(layout_flags, 'double-only', 'Only populate double-page spreads')
     _add_invertable(layout_flags, 'odd-only', 'Only populate odd-numbered pages')
     _add_invertable(layout_flags, 'even-only', 'Only populate even-numbered pages')
     _add_invertable(layout_flags, 'overfill', 'Overfill pages')
     _add_invertable(layout_flags, 'add-pages', 'Add pages to existing book if necessary')
     _add_invertable(layout_flags, 'single', 'Scale all images to fit on single page')
+    _add_invertable(layout_flags, 'mix-aspect', 'Allow mixed aspect-ratios on one row')
     layout_flags.add_argument('--scale-pages', type=int, default=0,
                               help='Scale all images to fit on N pages')
+    layout_flags.add_argument('--pano-threshold', metavar='N', type=float,
+                          default=3.0, help='Threshold to consider an image panoramic (default: %(default).0f)')
+    layout_flags.add_argument('--aspect-threshold', metavar='N', type=float,
+                          default=0.66, help='Threshold to consider an image panoramic (default: %(default).0f)')
 
     sort_options = parser.add_argument_group('Sorting options')
     sort_options.add_argument('--random',
@@ -495,7 +523,7 @@ def parse_args():                         # pylint: disable=I0011,R0915
     sort_options.add_argument('--exiftool', default='exiftool',
                               help='Location of exiftool (needed if sorting by exif fields')
 
-    section_options = parser.add_argument_group('Miscellaneous options')
+    section_options = parser.add_argument_group('Section options')
     section_options.add_argument("--sections", metavar='<section-name>', nargs='+',
                                  help='Names/order of sections to include')
     section_options.add_argument("--section-field", metavar='<exif-tag>',
@@ -539,6 +567,8 @@ def parse_args():                         # pylint: disable=I0011,R0915
                               help='Target PPI')
     misc_options.add_argument('--preview-ppi', type=int, default=150,
                               help='Preview PPI')
+    misc_options.add_argument('--verbose', action='store_true',
+                              help='Enable verbose tracing')
 
     positional_options = parser.add_argument_group('Positional arguments')
     positional_options.add_argument('image_list', metavar='<image-file>', nargs='*',
@@ -552,12 +582,12 @@ def parse_args():                         # pylint: disable=I0011,R0915
     if args.double_only:
         args.double = True
     if args.output and os.path.exists(args.output) and not args.force:
-        print 'Target file %s already exists' % args.output
+        print ('Target file %s already exists' % args.output)
         sys.exit()
     if not args.output:
         args.output = args.input
     if not (args.output or args.output_dir):
-        print 'No target specified'
+        print ('No target specified')
         sys.exit()
     return args
 
@@ -620,7 +650,8 @@ def preview_one(layout, pageno, double, args, previews):
             draw = ImageDraw.Draw(canvas)
             ppi = 72.0/img.scale
             name = os.path.splitext(os.path.basename(img.image.src))[0]
-            text = '%s\n%d ppi ' % (name, ppi)
+            aspect = float(width)/height
+            text = '%s\n%d ppi\n%.2f' % (name, ppi, aspect)
             draw.text((x, y), text, (57, 255, 20), font=font)
             if ppi < args.min_ppi:
                 draw.line((x, y, x+width, y+height), fill='red', width=5)
@@ -646,11 +677,11 @@ def check_sizes(args, populated):
             name = os.path.splitext(os.path.basename(img.image.src))[0]
             width, height = recommend_size(args, img)
             if ppi < args.min_ppi:
-                print 'Resolution too low for %s (%d ppi) - ideal size (%d,%d)' % \
-                       (name, ppi, width, height)
+                print ('Resolution too low for %s (%d ppi) - ideal size (%d,%d)' % \
+                       (name, ppi, width, height))
             elif ppi > args.max_ppi:
-                print 'Resolution too high for %s (%d ppi) - ideal size (%d,%d)' % \
-                       (name, ppi, width, height)
+                print ('Resolution too high for %s (%d ppi) - ideal size (%d,%d)' % \
+                       (name, ppi, width, height))
 
 def create_backup(extracted):
     """ Create a backup of the bbf2.xml in old_bbfs/bbf2_000000000<n>.xml """
@@ -730,13 +761,13 @@ def sort_images(images, args):
         else:
             if args.sort == 'rating':
                 args.sort = 'XMP:Rating'
-            print 'Sorting by exiftool field %s' % args.sort
+            print ('Sorting by exiftool field %s' % args.sort)
             with ExifTool(executable=args.exiftool) as exiftool:
                 images = sorted(images,
                                 key=lambda image: exiftool.get_tag(image.src, args.sort))
                 if exiftool.missing_tags:
-                    print 'Warning: exif tag %s not found in %d of %d images' % \
-                          (args.sort, exiftool.missing_tags, len(images))
+                    print ('Warning: exif tag %s not found in %d of %d images' % \
+                          (args.sort, exiftool.missing_tags, len(images)))
                 return images
     else:
         return images
@@ -807,7 +838,7 @@ def initialize_output_directory(args):
     if args.output_dir:
         if os.path.exists(args.output_dir):
             if not args.force:
-                print 'Target directory %s already exists' % args.output_dir
+                print ('Target directory %s already exists' % args.output_dir)
                 sys.exit()
             shutil.rmtree(args.output_dir)
         istemp = False
@@ -904,10 +935,10 @@ def populate_single_page(args, count, images, pagenos):
             args.random = args.random[:-1]
         else:
             break
-    print 'Optimized image height is %d' % (args.image_height)
+    print ('Optimized image height is %d' % (args.image_height))
     if args.random:
-        print 'Optimized seed %s' % (args.random)
-    print 'Optimization incomplete: %d' % (incomplete)
+        print ('Optimized seed %s' % (args.random))
+    print ('Optimization incomplete: %d' % (incomplete))
     return populate_pages(args, images, pagenos)
 
 def populate_section(doc, args, pagenos, images, previews):
