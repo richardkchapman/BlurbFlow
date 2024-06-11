@@ -21,10 +21,10 @@ def extract_files(path, cursor):
             os.makedirs(filedir)
         with open(filepath, 'wb') as output_file:
             if filesize == -1:
+                print('Missing size')
                 output_file.write(row['filecontent'])
             else:
                 output_file.write(row['filecontent'][0:row['filesize']])
-
         timestamp = datetime.strptime(filedate, "%Y-%m-%d %H:%M:%S")
         utime = time.mktime(timestamp.timetuple())
         os.utime(filepath, (utime, utime))

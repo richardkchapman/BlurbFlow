@@ -1,4 +1,5 @@
 #!/usr/bin/env python
+from __future__ import print_function
 """This script merges files from a directory into a .blurb database"""
 
 import sqlite3
@@ -9,17 +10,18 @@ import tempfile
 from datetime import datetime
 from PIL import Image
 import lxml.etree as ET
+import shutil
 
 def _insert_file(conn, fullpath, filepath):
     with open(fullpath, 'rb') as my_file:
         filecontent = my_file.read()
     filedate = datetime.fromtimestamp(os.path.getmtime(fullpath))
     sql = "INSERT INTO Files (filepath, filecontent, filesize, filedate) " \
-          "values (:filepath, :filecontent, :filesize, :filedate);"
+        "values (:filepath, :filecontent, :filesize, :filedate);"
     conn.execute(sql, {'filepath': filepath,
-                       'filecontent':buffer(filecontent),
-                       'filesize':len(filecontent),
-                       'filedate':filedate.isoformat(' ')})
+                    'filecontent':memoryview(filecontent),
+                    'filesize':len(filecontent),
+                    'filedate':filedate.isoformat(' ',timespec='seconds')})
     conn.commit()
 
 def _update_version(conn, version):
@@ -28,11 +30,11 @@ def _update_version(conn, version):
 
 def _populate_image(conn, source_dir, guid, original, create_thumbs):
     ext = os.path.splitext(original)[1][1:].lower()
-    localname = "/images/%s.%s" % (guid, ext)
+    localname = "images/%s.%s" % (guid, ext)
     if not os.path.exists(source_dir+localname):
         _insert_file(conn, original, localname)
     if create_thumbs:
-        localname = "/thumbnails/%s.jpg" % guid
+        localname = "thumbnails/%s.jpg" % guid
         if not os.path.exists(source_dir+localname):
             img = Image.open(original)
             img.thumbnail((640, 640), Image.ANTIALIAS)
@@ -48,20 +50,27 @@ def _add_missing_images(conn, source, create_thumbs):
         if entry.get('guid') in used_images:
             _populate_image(conn, source, entry.get('guid'), entry.get('src'), create_thumbs)
 
-def merge(source, target, add_missing=True, create_thumbs=False):
+def merge(source, target, add_missing=True, create_thumbs=False, template=None):
     """ Merge files from directory 'source' to blurb file 'target'. """
     if os.path.exists(target):
         os.remove(target)
-    conn = sqlite3.connect(target)
-    conn.cursor().execute("CREATE TABLE 'ArchiveVersion' ('version' NUM);")
-    conn.cursor().execute("CREATE TABLE 'Files' ('filepath' TEXT NOT NULL UNIQUE, " \
-                          "'filecontent' BLOB , 'filesize' NUM NOT NULL DEFAULT -1, " \
-                          "'filedate' TEXT NOT NULL DEFAULT 'Unknown');")
-    conn.commit()
+    if template:
+        shutil.copyfile(template, target)
 
+    conn = sqlite3.connect(target, isolation_level=None)
+    if not template:
+        conn.execute('pragma journal_mode=wal')
+        conn.cursor().execute("CREATE TABLE 'ArchiveVersion' ('version' NUM);")
+        conn.cursor().execute("CREATE TABLE 'Files' ('filepath' TEXT NOT NULL UNIQUE, " \
+                              "'filecontent' BLOB , 'filesize' NUM NOT NULL DEFAULT -1, " \
+                              "'filedate' TEXT NOT NULL DEFAULT 'Unknown');")
+        conn.commit()
+    else:
+        conn.cursor().execute("DELETE FROM Files WHERE TRUE;")
+        conn.cursor().execute("DELETE FROM ArchiveVersion WHERE TRUE;")
     for root, _, files in os.walk(source):
         for fname in files:
-            subroot = root[len(source):]
+            subroot = root[len(source)+1:]
             subfile = subroot+'/'+fname if len(subroot) else fname
             if subfile == '.version':
                 with open(root+'/'+fname, 'r') as input_file:
@@ -80,11 +89,12 @@ def _main():
     parser.add_argument('--add-thumbnails', help='Add missing thumbnails', action='store_true')
     parser.add_argument('source')
     parser.add_argument('target')
+    parser.add_argument('--template')
     args = parser.parse_args()
     if os.path.exists(args.target) and not args.force:
-        print 'Target file %s already exists' % args.target
+        print('Target file %s already exists' % args.target)
         sys.exit()
-    merge(args.source, args.target, args.add_missing, args.add_thumbnails)
+    merge(args.source, args.target, args.add_missing, args.add_thumbnails, args.template)
 
 if __name__ == '__main__':
     _main()
