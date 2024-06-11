@@ -2,6 +2,7 @@
 from __future__ import print_function
 """ Append one blurb bool to another"""
 import os
+import argparse
 import sys
 import math
 import uuid
@@ -132,18 +133,26 @@ def main():
     global doc
     global reg
     global guidmap
-    output_dir = "./TEMP"#tempfile.mkdtemp()
+    output_dir = tempfile.mkdtemp()
+    parser = argparse.ArgumentParser(description='Concatenate blurb files')
+    parser.add_argument('-f', '--force', dest='force', help='Force overwrite', action='store_true')
+    parser.add_argument('target')
+    parser.add_argument('sources', nargs='+')
+    args = parser.parse_args()
+    if os.path.exists(args.target) and not args.force:
+        print('Target file %s already exists' % args.target)
+        sys.exit()
 
-    extractBlurbFiles.extract(sys.argv[2], output_dir)
+    extractBlurbFiles.extract(args.sources[0], output_dir)
     xml_parser = ET.XMLParser(remove_blank_text=True, strip_cdata=False)
     doc = ET.parse(output_dir+'/bbf2.xml', xml_parser)
     reg = ET.parse(output_dir+'/media_registry.xml', xml_parser)
-    for infile in sys.argv[3:]:
+    for infile in args.sources[1:]:
         concatBlurb(infile)
     doc.write(output_dir+'/bbf2.xml', pretty_print=True)
     reg.write(output_dir+'/media_registry.xml', pretty_print=True)
-    #mergeBlurbFiles.merge(output_dir, sys.argv[1], create_thumbs=False)
-    #shutil.rmtree(output_dir)
+    mergeBlurbFiles.merge(output_dir, args.target, add_missing=False, create_thumbs=False, template=None)
+    shutil.rmtree(output_dir)
 
 
 if __name__ == '__main__':
